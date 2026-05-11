@@ -20,11 +20,43 @@ echo "准备环境..."
 rm -rf artifact/installer staging
 mkdir -p passwall-ipk artifact/installer staging
 
-# 复制本地已有的 luci 包
-echo "使用本地 luci 包..."
+# 检查 passwall-ipk 目录是否为空，如果是则下载 IPK 包
 if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
-    echo "错误: passwall-ipk 目录为空，请确保包含 luci-app-passwall 和 luci-i18n-passwall-zh-cn 包"
-    exit 1
+    echo "passwall-ipk 目录为空，正在下载 luci-app-passwall 和 luci-i18n-passwall-zh-cn 包..."
+    
+    # 最新版本信息
+    RELEASE_TAG="26.5.11-1"
+    APP_FILENAME="22.03-_luci-app-passwall_26.5.11_all.ipk"
+    I18N_FILENAME="22.03-_luci-i18n-passwall-zh-cn_26.5.11_all.ipk"
+    
+    # 直接构建下载链接
+    APP_URL="https://github.com/Openwrt-Passwall/openwrt-passwall/releases/download/${RELEASE_TAG}/${APP_FILENAME}"
+    I18N_URL="https://github.com/Openwrt-Passwall/openwrt-passwall/releases/download/${RELEASE_TAG}/${I18N_FILENAME}"
+    
+    echo "尝试下载 APP: $APP_URL"
+    if ! curl -fL "$APP_URL" -o "passwall-ipk/$APP_FILENAME"; then
+        echo "错误: 无法下载 luci-app-passwall 包"
+        exit 1
+    fi
+    echo "成功下载 APP"
+    
+    echo "尝试下载 I18N: $I18N_URL"
+    if curl -fL "$I18N_URL" -o "passwall-ipk/$I18N_FILENAME"; then
+        echo "成功下载 I18N"
+    else
+        echo "警告: 无法下载中文语言包，将继续构建但不包含语言包"
+    fi
+    
+    echo "已下载文件："
+    ls -lh passwall-ipk/
+    
+    # 验证至少成功下载了 APP 包
+    if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
+        echo "错误: passwall-ipk 目录仍然为空"
+        exit 1
+    fi
+else
+    echo "使用本地已有的 luci 包..."
 fi
 
 # 获取日期
