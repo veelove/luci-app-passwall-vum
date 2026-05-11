@@ -17,8 +17,15 @@ echo "========================================="
 
 # 准备环境
 echo "准备环境..."
-rm -rf artifact/installer passwall-ipk staging
+rm -rf artifact/installer staging
 mkdir -p passwall-ipk artifact/installer staging
+
+# 复制本地已有的 luci 包
+echo "使用本地 luci 包..."
+if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
+    echo "错误: passwall-ipk 目录为空，请确保包含 luci-app-passwall 和 luci-i18n-passwall-zh-cn 包"
+    exit 1
+fi
 
 # 获取日期
 BUILD_DATE=$(date)
@@ -31,49 +38,20 @@ case "$TARGET_ARCH" in
 esac
 echo "架构映射: $ARCH_MAP"
 
-# 获取最新版本
-echo "获取最新版本..."
-curl_gh() { 
-  if [ -n "$GITHUB_TOKEN" ]; then
-    curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"
-  else
-    curl -fsSL -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"
-  fi
-}
-
-API_LATEST="https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest"
-RELEASE_DATA=$(curl_gh "$API_LATEST" || true)
-LATEST_VERSION=$(echo "$RELEASE_DATA" | jq -r .tag_name || true)
-[ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" = "null" ] && LATEST_VERSION="26.5.3-1"
-echo "最新版本: $LATEST_VERSION"
-
-# 从 GitHub release 中找到合适的 luci 包
-echo "从 GitHub 下载 luci 包..."
-APP_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-app-passwall.*\\.ipk$")) | .browser_download_url' | head -n 1)
-I18N_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.ipk$")) | .browser_download_url' | head -n 1)
-
-echo "下载 APP: $APP_URL"
-curl -fL "$APP_URL" -o passwall-ipk/$(basename "$APP_URL")
-echo "下载 I18N: $I18N_URL"
-curl -fL "$I18N_URL" -o passwall-ipk/$(basename "$I18N_URL")
-
 # 定位 luci 包
 echo "定位 luci 包..."
 find_app() { find passwall-ipk -type f -name '*luci-app-passwall*.ipk' | head -n1 || true; }
 find_i18n() { find passwall-ipk -type f -name '*luci-i18n-passwall-zh-cn*.ipk' | head -n1 || true; }
 
-APP_PKG="$(find_app)"; I18N_PKG="$(find_i18n)"
+APP_PKG="$(find_app)"
+I18N_PKG="$(find_i18n)"
 
 if [ -z "$APP_PKG" ]; then
-  echo "未找到 luci-app-passwall 顶层包"
-  exit 1
-fi
-if [ -z "$I18N_PKG" ]; then
-  echo "未找到 zh-cn 语言包"
+  echo "错误: 未找到 luci-app-passwall 包"
   exit 1
 fi
 
-echo "定位到:"
+echo "定位到："
 echo "APP: $APP_PKG"
 echo "I18N: $I18N_PKG"
 
@@ -82,7 +60,7 @@ APP_PATH="$APP_PKG"
 BASE="$(basename "$APP_PATH")"
 APPVER="$(echo "$BASE" | sed -E 's/^.*luci-app-passwall_([^_]+).*\.ipk$/\1/')"
 if [ -z "${APPVER:-}" ] || [ "$APPVER" = "$BASE" ]; then
-  LV="$LATEST_VERSION"; APPVER="${LV%%-*}"
+  APPVER="25.11.15"
 fi
 echo "APP 版本: $APPVER"
 
@@ -95,18 +73,22 @@ rm -rf "$STAGING_DIR"
 mkdir -p "$DEP_DIR"
 
 APP_BASE="$(basename "$APP_PKG")"
-I18N_BASE="$(basename "$I18N_PKG")"
 cp -f "$APP_PKG" "$STAGING_DIR/$APP_BASE"
 cp -f "$APP_PKG" "$STAGING_DIR/luci-app-passwall.ipk"
-cp -f "$I18N_PKG" "$STAGING_DIR/$I18N_BASE"
-cp -f "$I18N_PKG" "$STAGING_DIR/luci-i18n-passwall-zh-cn.ipk"
 
-# 复制本地的 depends 目录（从老版本提取出来的）
+if [ -n "$I18N_PKG" ]; then
+  I18N_BASE="$(basename "$I18N_PKG")"
+  cp -f "$I18N_PKG" "$STAGING_DIR/$I18N_BASE"
+  cp -f "$I18N_PKG" "$STAGING_DIR/luci-i18n-passwall-zh-cn.ipk"
+fi
+
+# 复制本地的 depends 目录（包含完整依赖）
+echo "复制依赖包..."
 if [ -d depends ]; then
-  echo "复制依赖包..."
   cp -r depends/* "$DEP_DIR/"
 fi
 
+# 生成安装脚本
 cat > "$STAGING_DIR/install.sh" <<'EOF'
 #!/bin/sh
 set -e
@@ -168,7 +150,7 @@ refresh_luci() {
   sync
 }
 
-# 使用固定文件名，不再通配
+# 使用固定文件名
 APP_PKG="luci-app-passwall.ipk"
 I18N_PKG="luci-i18n-passwall-zh-cn.ipk"
 
@@ -254,7 +236,7 @@ if [ -f /usr/lib/lua/luci/controller/passwall.lua ] || ls /usr/lib/lua/luci/cont
   fi
   exit 0
 else
-  echo "! 警告：未检测到 PassWall 控制器文件，可能需刷新浏览器或重新登录 LuCI。"
+  echo "! 警告: 未检测到 PassWall 控制器文件，可能需刷新浏览器或重新登录 LuCI。"
   exit 0
 fi
 EOF
@@ -265,7 +247,7 @@ LABEL="PassWall_${APPVER}_with_sdk_${SDK_VERSION}_${OPENSSL_TAG}"
 makeself --gzip --nox11 "$STAGING_DIR" "$OUTPUT" "$LABEL" ./install.sh
 
 echo "PassWall(luci-app)版本: $APPVER" > version.txt
-echo "上游Release Tag: $LATEST_VERSION" >> version.txt
+echo "上游Release Tag: $APPVER-r1" >> version.txt
 echo "SDK版本: $SDK_VERSION" >> version.txt
 echo "OpenSSL标记: $OPENSSL_TAG" >> version.txt
 echo "构建时间: $BUILD_DATE" >> version.txt

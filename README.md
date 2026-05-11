@@ -109,8 +109,8 @@ chmod +x PassWall_26.5.3_x86_64_all_sdk_22.03.7.run
 安装包中包含完整的 23 个 PassWall 依赖包：
 - chinadns-ng
 - dns2socks
-- geoview
-- hysteria
+- **geoview** ([snowie2000/geoview](https://github.com/snowie2000/geoview))
+- **hysteria** ([apernet/hysteria](https://github.com/apernet/hysteria))
 - ipt2socks
 - microsocks
 - naiveproxy
@@ -118,12 +118,22 @@ chmod +x PassWall_26.5.3_x86_64_all_sdk_22.03.7.run
 - shadowsocks-rust (sslocal/ssserver)
 - shadowsocksr-libev (ssr-local/ssr-redir/ssr-server)
 - simple-obfs-client
-- sing-box
+- **sing-box** ([SagerNet/sing-box](https://github.com/SagerNet/sing-box))
 - tcping
 - trojan-plus
 - tuic-client
 - v2ray-geoip, v2ray-geosite, v2ray-plugin
-- xray-core, xray-plugin
+- **xray-core** ([XTLS/Xray-core](https://github.com/XTLS/Xray-core)), xray-plugin
+
+## 组件上游源
+
+| 组件 | 上游源 |
+|------|--------|
+| Geoview | https://github.com/snowie2000/geoview |
+| Xray-core | https://github.com/XTLS/Xray-core |
+| Sing-Box | https://github.com/SagerNet/sing-box |
+| Hysteria | https://github.com/apernet/hysteria |
+| PassWall | https://github.com/Openwrt-Passwall/openwrt-passwall |
 
 ## 清理
 
