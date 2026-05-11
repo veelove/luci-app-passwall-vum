@@ -1,0 +1,10 @@
+# Build artifacts
+artifact/
+passwall-ipk/
+staging/
+*.run
+*.zip
+version.txt
+
+# Docker
+.dockerignore

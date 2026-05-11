@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: passwall-builder
+    volumes:
+      - ./:/build
+      - ./artifact:/build/artifact
+    working_dir: /build
+    environment:
+      - TARGET_ARCH=x86_64
+      - SDK_VERSION=22.03.7
+      - OPENSSL_TAG=libopenssl_1.1
+      - BUILD_OPTION=standard
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    command: bash -c "chmod +x build.sh && ./build.sh $$TARGET_ARCH $$SDK_VERSION $$OPENSSL_TAG $$BUILD_OPTION"
