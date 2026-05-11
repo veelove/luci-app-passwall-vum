@@ -8,3 +8,6 @@ version.txt
 
 # Docker
 .dockerignore
+
+# macOS
+.DS_Store
