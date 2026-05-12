@@ -96,6 +96,7 @@ chmod +x PassWall_26.5.3_x86_64_all_sdk_22.03.7.run
 ├── README.md                      # 本文档
 ├── build-passwall.yml            # GitHub Actions 工作流
 ├── build.sh                      # 构建脚本
+├── make-ipk.sh                   # IPK 打包工具
 ├── Dockerfile                    # Docker 构建环境
 ├── docker-compose.yml            # Docker Compose 配置
 ├── Makefile                      # Make 命令入口
@@ -103,6 +104,68 @@ chmod +x PassWall_26.5.3_x86_64_all_sdk_22.03.7.run
 ├── artifact/installer/           # 构建产物目录
 └── ...
 ```
+
+## make-ipk.sh 打包工具说明
+
+`make-ipk.sh` 是一个用于自动从 GitHub 下载最新预编译二进制文件并打包成 OpenWrt/LEDE IPK 格式的工具。
+
+### 支持的包
+
+- **xray**: Xray-core 代理工具
+- **hysteria**: Hysteria 代理工具
+- **geoview**: GeoView 工具
+- **sing-box**: Sing-box 代理工具
+
+### 使用方法
+
+#### 1. 打包单个包
+
+```bash
+# 打包 xray
+./make-ipk.sh xray
+
+# 打包 hysteria
+./make-ipk.sh hysteria
+
+# 打包 geoview
+./make-ipk.sh geoview
+
+# 打包 sing-box
+./make-ipk.sh sing-box
+```
+
+#### 2. 全面打包所有包
+
+```bash
+# 一次性打包所有支持的包
+./make-ipk.sh all
+```
+
+#### 3. 指定输出目录
+
+```bash
+# 打包到指定目录（例如 depends/）
+./make-ipk.sh xray ./depends
+
+# 全面打包到指定目录
+./make-ipk.sh all ./depends
+```
+
+### 工作原理
+
+1. 自动从 GitHub Releases 页面获取最新版本号
+2. 下载对应架构的预编译二进制文件（默认 x86_64）
+3. 自动检测二进制文件架构
+4. 构建标准 IPK 包格式（包含 control.tar.gz、data.tar.gz、debian-binary）
+5. 输出到指定目录
+
+### 输出格式
+
+生成的 IPK 包命名格式为：`{包名}_{版本号}_{架构}.ipk`
+
+例如：
+- `xray_26.5.9_x86_64.ipk`
+- `hysteria_2.9.1_x86_64.ipk`
 
 ## 依赖包说明
 
