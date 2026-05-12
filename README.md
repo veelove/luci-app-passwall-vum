@@ -30,7 +30,7 @@ make help
 | 参数 | 默认值 | 可选值 | 说明 |
 |------|--------|--------|------|
 | `TARGET_ARCH` | `x86_64` | `x86_64`, `aarch64_cortex-a53`, `aarch64_generic` | 目标设备架构 |
-| `SDK_VERSION` | `22.03.7` | - | SDK 版本标记 |
+| `SDK_VERSION` | `24.10.6` | - | SDK 版本标记 |
 | `OPENSSL_TAG` | `libopenssl_1.1` | - | OpenSSL 标签 |
 | `BUILD_OPTION` | `standard` | `minimal`, `standard`, `full` | 构建选项 |
 
@@ -75,7 +75,7 @@ make build
 构建完成后，安装包位于：
 ```
 artifact/installer/
-├── PassWall_26.5.3_x86_64_all_sdk_22.03.7.run  # 自解压安装包 (72MB)
+├── PassWall_26.5.11_x86_64_all_sdk_24.10.6.run  # 自解压安装包
 └── version.txt  # 版本信息
 ```
 
@@ -84,8 +84,8 @@ artifact/installer/
 1. 将 `.run` 文件上传到路由器
 2. 执行安装：
 ```bash
-chmod +x PassWall_26.5.3_x86_64_all_sdk_22.03.7.run
-./PassWall_26.5.3_x86_64_all_sdk_22.03.7.run
+chmod +x PassWall_26.5.11_x86_64_all_sdk_24.10.6.run
+./PassWall_26.5.11_x86_64_all_sdk_24.10.6.run
 ```
 3. 安装完成后，在 LuCI 界面访问：**服务 → PassWall**
 
