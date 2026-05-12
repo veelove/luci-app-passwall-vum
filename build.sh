@@ -3,7 +3,7 @@ set -e
 
 # 默认参数
 TARGET_ARCH=${1:-x86_64}
-SDK_VERSION=${2:-22.03.7}
+SDK_VERSION=${2:-24.10.6}
 OPENSSL_TAG=${3:-libopenssl_1.1}
 BUILD_OPTION=${4:-standard}
 GITHUB_TOKEN=${GITHUB_TOKEN:-}

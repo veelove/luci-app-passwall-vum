@@ -17,7 +17,7 @@ on:
       sdk_version:
         description: 'SDK 版本标记（用于文件名和标签）'
         required: true
-        default: '22.03.7'
+        default: '24.10.6'
       openssl_tag:
         description: 'OpenSSL 标记（用于标签）'
         required: true
