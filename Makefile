@@ -2,7 +2,7 @@
 
 # 默认参数
 TARGET_ARCH ?= x86_64
-SDK_VERSION ?= 22.03.7
+SDK_VERSION ?= 24.10.6
 OPENSSL_TAG ?= libopenssl_1.1
 BUILD_OPTION ?= standard
 
