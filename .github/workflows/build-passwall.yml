@@ -169,6 +169,85 @@ jobs:
           echo "appver=$APPVER" >> "$GITHUB_OUTPUT"
           echo "APP_VERSION=$APPVER" >> "$GITHUB_ENV"
 
+      - name: 下载最新核心（Xray/Sing-Box/Hysteria）并打包为 ipk
+        id: cores
+        run: |
+          set -e
+          curl_gh() { curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
+
+          ARCH_MAP="${ARCH_MAP:?}"
+          # 目标架构 -> 上游二进制架构
+          case "$ARCH_MAP" in
+            x86_64) GOARCH=amd64 ;;
+            aarch64_cortex-a53|aarch64_generic) GOARCH=arm64 ;;
+            *) echo "错误: 不支持的架构 $ARCH_MAP"; exit 1 ;;
+          esac
+          echo "核心二进制架构: $GOARCH（ipk Architecture: $ARCH_MAP）"
+
+          mkdir -p cores
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+
+          # 通用 ipk 打包：mk_ipk <包名> <版本> <二进制路径>
+          mk_ipk() {
+            name="$1"; ver="$2"; bin="$3"
+            d="$WORK/$name"
+            mkdir -p "$d/control" "$d/data/usr/bin"
+            install -m 0755 "$bin" "$d/data/usr/bin/$name"
+            cat > "$d/control/control" <<EOF
+          Package: $name
+          Version: $ver
+          Architecture: $ARCH_MAP
+          Maintainer: passwall-builder
+          Description: $name latest upstream binary
+          EOF
+            tar -C "$d/control" -czf "$d/control.tar.gz" .
+            tar -C "$d/data" -czf "$d/data.tar.gz" .
+            printf '2.0\n' > "$d/debian-binary"
+            tar -C "$d" -czf "cores/${name}_${ver}_${ARCH_MAP}.ipk" debian-binary control.tar.gz data.tar.gz
+            echo "已打包: cores/${name}_${ver}_${ARCH_MAP}.ipk"
+          }
+
+          # ---------- Xray（上游所有 release 均标记为 prerelease，取列表第一个最新 tag） ----------
+          XRAY_VER="$(curl_gh "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=1" | jq -r '.[0].tag_name' | sed 's/^v//')"
+          if [ "$GOARCH" = amd64 ]; then XRAY_ASSET="Xray-linux-64.zip"; else XRAY_ASSET="Xray-linux-arm64-v8a.zip"; fi
+          echo "下载 Xray v$XRAY_VER ($XRAY_ASSET) ..."
+          curl -fL "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VER}/${XRAY_ASSET}" -o "$WORK/xray.zip"
+          mkdir -p "$WORK/xray-extract"
+          unzip -oq "$WORK/xray.zip" xray -d "$WORK/xray-extract"
+          mk_ipk xray "$XRAY_VER" "$WORK/xray-extract/xray"
+
+          # ---------- Sing-Box（取最新稳定版，跳过 alpha/beta/rc；OpenWrt 为 musl libc，必须用 musl 变体） ----------
+          SB_VER="$(curl_gh "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r .tag_name | sed 's/^v//')"
+          SB_ASSET="sing-box-${SB_VER}-linux-${GOARCH}-musl.tar.gz"
+          echo "下载 Sing-Box v$SB_VER ($SB_ASSET) ..."
+          curl -fL "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/${SB_ASSET}" -o "$WORK/sing-box.tar.gz"
+          mkdir -p "$WORK/sb-extract"
+          tar -xzf "$WORK/sing-box.tar.gz" -C "$WORK/sb-extract"
+          SB_BIN="$(find "$WORK/sb-extract" -type f -name sing-box | head -n1)"
+          [ -n "$SB_BIN" ] || { echo "错误: sing-box 二进制解压失败"; exit 1; }
+          mk_ipk sing-box "$SB_VER" "$SB_BIN"
+
+          # ---------- Hysteria（取最新稳定版，tag 形如 app/v2.12.2） ----------
+          HY_TAG="$(curl_gh "https://api.github.com/repos/apernet/hysteria/releases/latest" | jq -r .tag_name)"
+          HY_VER="$(echo "$HY_TAG" | sed 's#.*/v##')"
+          HY_TAG_ENC="$(printf '%s' "$HY_TAG" | sed 's#/#%2F#g')"
+          HY_ASSET="hysteria-linux-${GOARCH}"
+          echo "下载 Hysteria v$HY_VER ($HY_ASSET) ..."
+          mkdir -p "$WORK/hy-extract"
+          curl -fL "https://github.com/apernet/hysteria/releases/download/${HY_TAG_ENC}/${HY_ASSET}" -o "$WORK/hy-extract/hysteria"
+          mk_ipk hysteria "$HY_VER" "$WORK/hy-extract/hysteria"
+
+          echo "XRAY_VERSION=$XRAY_VER" >> "$GITHUB_ENV"
+          echo "SINGBOX_VERSION=$SB_VER" >> "$GITHUB_ENV"
+          echo "HYSTERIA_VERSION=$HY_VER" >> "$GITHUB_ENV"
+          echo "xray=$XRAY_VER" >> "$GITHUB_OUTPUT"
+          echo "singbox=$SB_VER" >> "$GITHUB_OUTPUT"
+          echo "hysteria=$HY_VER" >> "$GITHUB_OUTPUT"
+
+          echo "最新核心打包结果："
+          ls -lh cores/
+
       - name: 构建 Makeself 安装包（完全对齐样例结构/逻辑）
         run: |
           set -e
@@ -201,6 +280,13 @@ jobs:
           if [ -d depends ]; then
             echo "复制依赖包..."
             cp -r depends/* "$DEP_DIR/"
+          fi
+
+          # 用构建时下载的最新核心替换 depends 中的旧版 xray/sing-box/hysteria
+          if ls cores/*.ipk >/dev/null 2>&1; then
+            echo "注入最新核心 ipk（Xray/Sing-Box/Hysteria）..."
+            rm -f "$DEP_DIR"/xray_*.ipk "$DEP_DIR"/sing-box_*.ipk "$DEP_DIR"/hysteria_*.ipk
+            cp -f cores/*.ipk "$DEP_DIR/"
           fi
 
           echo "打包目录预览："
@@ -299,6 +385,21 @@ jobs:
             opkg install depends/*.ipk || true
           fi
 
+          # 强制更新三大核心为随包附带的最新版本（覆盖路由器上已安装的旧版本）
+          for core in xray sing-box hysteria; do
+            core_pkg="$(ls depends/${core}_*.ipk 2>/dev/null | head -n1)"
+            if [ -n "$core_pkg" ]; then
+              echo "更新核心 $core -> $core_pkg"
+              opkg install "$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
+            fi
+          done
+
+          # 打印核心版本，便于确认
+          echo "当前核心版本："
+          /usr/bin/xray version 2>/dev/null | head -n1 || true
+          /usr/bin/sing-box version 2>/dev/null | head -n1 || true
+          /usr/bin/hysteria version 2>/dev/null | head -n2 || true
+
           # 额外常用组件（容错）
           echo "安装额外组件..."
           opkg install haproxy shadowsocks-libev-ss-local shadowsocks-libev-ss-redir shadowsocks-libev-ss-server 2>/dev/null || true
@@ -366,6 +467,9 @@ jobs:
 
           echo "PassWall(luci-app)版本: $APP_VERSION" > version.txt
           echo "上游Release Tag: $LATEST_VERSION" >> version.txt
+          echo "Xray版本: ${XRAY_VERSION:-未知}" >> version.txt
+          echo "Sing-Box版本: ${SINGBOX_VERSION:-未知}" >> version.txt
+          echo "Hysteria版本: ${HYSTERIA_VERSION:-未知}" >> version.txt
           echo "SDK版本: $SDK_VERSION" >> version.txt
           echo "OpenSSL标记: $OPENSSL_TAG" >> version.txt
           echo "构建时间: ${{ steps.date.outputs.date }}" >> version.txt
@@ -398,6 +502,9 @@ jobs:
             
             PassWall(luci-app)版本: ${{ steps.parsever.outputs.appver }}
             上游Release Tag: ${{ steps.fetch.outputs.version }}
+            Xray版本: ${{ steps.cores.outputs.xray }}
+            Sing-Box版本: ${{ steps.cores.outputs.singbox }}
+            Hysteria版本: ${{ steps.cores.outputs.hysteria }}
             SDK版本: ${{ inputs.sdk_version }}
             OpenSSL标记: ${{ inputs.openssl_tag }}
             构建时间: ${{ steps.date.outputs.date }}
