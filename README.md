@@ -30,9 +30,17 @@ make help
 | 参数 | 默认值 | 可选值 | 说明 |
 |------|--------|--------|------|
 | `TARGET_ARCH` | `x86_64` | `x86_64`, `aarch64_cortex-a53`, `aarch64_generic` | 目标设备架构 |
-| `SDK_VERSION` | `24.10.6` | - | SDK 版本标记 |
-| `OPENSSL_TAG` | `libopenssl_1.1` | - | OpenSSL 标签 |
+| `SDK_VERSION` | `25.00.0` | `23.05.5` / `24.10.6` / `25.00.0` 等 | SDK 版本标记;主版本决定包格式 (23.x → ipk,24.10+/25 → apk) |
+| `OPENSSL_TAG` | `libopenssl` | `libopenssl_1.1` (旧版) | OpenSSL 标签;OpenWrt 25 主线统一为 OpenSSL 3 |
 | `BUILD_OPTION` | `standard` | `minimal`, `standard`, `full` | 构建选项 |
+
+### SDK / 包格式对照
+
+| SDK 版本 | 包格式 | 包管理器 | OpenSSL |
+|----------|--------|----------|---------|
+| 23.05.x 及更早 | `.ipk` | `opkg` | `libopenssl_1.1` |
+| 24.10.x | `.apk` | `apk` (opkg 兼容) | `libopenssl` |
+| **25.00.0** (默认) | `.apk` | `apk` (opkg 兼容) | `libopenssl` |
 
 ## 使用方法
 
@@ -75,19 +83,23 @@ make build
 构建完成后，安装包位于：
 ```
 artifact/installer/
-├── PassWall_26.5.11_x86_64_all_sdk_24.10.6.run  # 自解压安装包
+├── PassWall_26.5.11_x86_64_all_sdk_25.00.0.run  # 自解压安装包 (apk)
 └── version.txt  # 版本信息
 ```
 
-## 在 iStoreOS 上安装
+> 老版本 (OpenWrt 23.x) 构建时文件名后缀为 `_sdk_23.05.5.run`,包内使用 `.ipk`。
+
+## 在 iStoreOS / OpenWrt 上安装
 
 1. 将 `.run` 文件上传到路由器
 2. 执行安装：
 ```bash
-chmod +x PassWall_26.5.11_x86_64_all_sdk_24.10.6.run
-./PassWall_26.5.11_x86_64_all_sdk_24.10.6.run
+chmod +x PassWall_26.5.11_x86_64_all_sdk_25.00.0.run
+./PassWall_26.5.11_x86_64_all_sdk_25.00.0.run
 ```
 3. 安装完成后，在 LuCI 界面访问：**服务 → PassWall**
+
+> 同一个 `.run` 在 OpenWrt 23.x (ipk/opkg) 与 24.10+/25.x (apk/apk) 上均可运行,脚本会根据构建时记录的包格式自动选择正确的包管理器。
 
 ## 项目结构
 
@@ -161,11 +173,13 @@ chmod +x PassWall_26.5.11_x86_64_all_sdk_24.10.6.run
 
 ### 输出格式
 
-生成的 IPK 包命名格式为：`{包名}_{版本号}_{架构}.ipk`
+默认生成 OpenWrt 24.10+/25.x 的 `.apk` 包;旧 OpenWrt 23.x 可传第三个参数 `ipk`。
+
+命名格式：`{包名}_{版本号}_{架构}.{apk|ipk}`
 
 例如：
-- `xray_26.5.9_x86_64.ipk`
-- `hysteria_2.9.1_x86_64.ipk`
+- `xray_26.5.9_x86_64.apk`
+- `hysteria_2.9.1_x86_64.ipk` (传入 ipk 参数时)
 
 ## 依赖包说明
 
@@ -220,5 +234,6 @@ make build-docker TARGET_ARCH=aarch64_generic
 
 ## 更新日志
 
+- **2026-09-19**: 支持 OpenWrt 25 主线 (apk/apk),默认 SDK 切换到 25.00.0;OpenWrt 23.x (ipk/opkg) 仍可显式构建
 - **2026-05-11**: 修复仓库地址 (xiaorouji → Openwrt-Passwall)，添加完整依赖包
 - **2025-08-30**: 解决安装过程中丢失登录状态问题
