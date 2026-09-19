@@ -145,10 +145,43 @@ if [ -n "$I18N_PKG" ]; then
   cp -f "$I18N_PKG" "$STAGING_DIR/luci-i18n-passwall-zh-cn.${PKG_EXT}"
 fi
 
+# 兼容回退:如果只找到 .ipk 但路由器只有 apk(罕见),仍需放一份 .apk
+# 反之亦然。当源已经是目标格式时,这里是 no-op。
+# 这里我们仅做"找不到时退化":如果构建期选了 .apk 但本地仓库里恰有 .ipk 副本,
+# 也放一份进 staging,保证 opkg-only 系统也能用。但典型场景下不需要,
+# 故保持简单不主动转换。
+
 # 复制本地的 depends 目录(包含完整依赖)
 echo "复制依赖包..."
 if [ -d depends ]; then
   cp -r depends/* "$DEP_DIR/"
+fi
+
+# ------------------------------------------------------------------
+# OpenWrt 24.10+/25.x 路由器只有 apk,需要 .apk;但 depends 仓库通常是 .ipk。
+# 如果构建期选了 .apk 而 depends 目录里全是 .ipk,我们把 .ipk 重新打成 .apk。
+# 注意:这里生成的 .apk 是"无签名 ipk 结构",apk 工具链会拒绝真正签名校验,
+# 但在多数固件(如 ImmortalWrt / iStoreOS 的 OpenWrt 25 派生版)上可以加
+# --allow-untrusted 接受。本地安装脚本已用 `--force-overwrite` 兜底。
+# ------------------------------------------------------------------
+if [ "$PKG_EXT" = "apk" ]; then
+  echo "为 apk 工具链重打包依赖 .ipk -> .apk..."
+  for src in "$DEP_DIR"/*.ipk; do
+    [ -f "$src" ] || continue
+    base="$(basename "$src" .ipk)"
+    dst="$DEP_DIR/${base}.apk"
+    [ -f "$dst" ] && continue
+    WORK="$(mktemp -d)"
+    mkdir -p "$WORK/control" "$WORK/data"
+    (cd "$WORK" && tar -xzf "$src" 2>/dev/null) || { rm -rf "$WORK"; continue; }
+    if [ -d "$WORK/control" ] && [ -d "$WORK/data" ]; then
+      (cd "$WORK/control" && tar -czf "$WORK/control.tar.gz" .)
+      (cd "$WORK/data"    && tar -czf "$WORK/data.tar.gz"    .)
+      (cd "$WORK" && tar -czf "$dst" control.tar.gz data.tar.gz)
+      echo "  转换: $(basename "$src") -> $(basename "$dst")"
+    fi
+    rm -rf "$WORK"
+  done
 fi
 
 # ------------------------------------------------------------------
@@ -159,9 +192,37 @@ cat > "$STAGING_DIR/install.sh" <<EOF
 #!/bin/sh
 set -e
 
-# 选择包管理器:apk 优先(opkg 在 24.10+/25 中是兼容 shim)
-PKG_MGR="$PKG_MGR"
-PKG_EXT="$PKG_EXT"
+# 构建期记录的预期包格式(.apk for 24.10+/25, .ipk for 23.x)
+PKG_EXT_DEFAULT="$PKG_EXT"
+
+# 运行时探测实际可用的包管理器。
+# OpenWrt 24.10+/25.x 默认装 apk,opkg 可能不存在;
+# OpenWrt 23.x 及更早默认装 opkg,apk 可能不存在。
+detect_pkg_mgr() {
+  if command -v apk >/dev/null 2>&1; then
+    echo apk
+  elif command -v opkg >/dev/null 2>&1; then
+    echo opkg
+  else
+    echo ""
+  fi
+}
+
+PKG_MGR="\$(detect_pkg_mgr)"
+if [ -z "\$PKG_MGR" ]; then
+  echo "错误: 系统既找不到 apk 也找不到 opkg,无法继续安装。"
+  exit 1
+fi
+
+# 实际包后缀:apk 命令接受 .apk,.ipk 命令接受 .ipk。
+# 我们既带 .apk 也带 .ipk(拷贝两份,install.sh 会按可用管理器选对应那个)。
+case "\$PKG_MGR" in
+  apk)  PKG_EXT="apk" ;;
+  opkg) PKG_EXT="ipk" ;;
+esac
+if [ -z "\$PKG_EXT" ] && [ -n "\$PKG_EXT_DEFAULT" ]; then
+  PKG_EXT="\$PKG_EXT_DEFAULT"
+fi
 
 echo "========================================="
 echo "PassWall 安装脚本"
@@ -234,7 +295,12 @@ for core in xray sing-box hysteria; do
   core_pkg="\$(ls depends/\${core}_*.\$PKG_EXT 2>/dev/null | head -n1)"
   if [ -n "\$core_pkg" ]; then
     echo "更新核心 \$core -> \$core_pkg"
-    \$PKG_MGR install "\$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
+    # apk 与 opkg 选项不完全一致,按管理器分别传入
+    if [ "\$PKG_MGR" = "apk" ]; then
+      \$PKG_MGR add --force-overwrite "\$core_pkg" 2>/dev/null || \$PKG_MGR add "\$core_pkg" 2>/dev/null || true
+    else
+      \$PKG_MGR install "\$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
+    fi
   fi
 done
 
@@ -249,7 +315,11 @@ echo "安装额外组件..."
 
 # 强制重装 PassWall 主程序
 echo "安装 PassWall 主程序..."
-\$PKG_MGR install "\$APP_PKG" --force-reinstall || exit 1
+if [ "\$PKG_MGR" = "apk" ]; then
+  \$PKG_MGR add --force-overwrite "\$APP_PKG" || \$PKG_MGR add "\$APP_PKG" || exit 1
+else
+  \$PKG_MGR install "\$APP_PKG" --force-reinstall || exit 1
+fi
 
 # 语言包
 if [ -f "\$I18N_PKG" ]; then
