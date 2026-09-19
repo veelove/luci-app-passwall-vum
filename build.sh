@@ -1,12 +1,23 @@
 #!/bin/bash
 set -e
 
-# 默认参数
+# 默认参数（同时兼容 OpenWrt 22.03 与 iStoreOS 25.x / OpenWrt 24.10+）
 TARGET_ARCH=${1:-x86_64}
-SDK_VERSION=${2:-24.10.6}
-OPENSSL_TAG=${3:-libopenssl_1.1}
+SDK_VERSION=${2:-25.05.0}
+OPENSSL_TAG=${3:-libopenssl}
 BUILD_OPTION=${4:-standard}
 GITHUB_TOKEN=${GITHUB_TOKEN:-}
+
+# 根据 SDK_VERSION 自动选择 OpenSSL 标记（22.03 用 libopenssl_1.1，新版本用 libopenssl）
+case "$SDK_VERSION" in
+    22.03*|19.07*|18.06*)
+        [ "$OPENSSL_TAG" = "libopenssl" ] && OPENSSL_TAG="libopenssl_1.1"
+        ;;
+    *)
+        [ "$OPENSSL_TAG" = "libopenssl_1.1" ] && OPENSSL_TAG="libopenssl"
+        ;;
+esac
+export OPENSSL_TAG
 
 echo "========================================="
 echo "PassWall 构建脚本"
@@ -23,33 +34,86 @@ mkdir -p passwall-ipk artifact/installer staging
 # 检查 passwall-ipk 目录是否为空，如果是则下载 IPK 包
 if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
     echo "passwall-ipk 目录为空，正在下载 luci-app-passwall 和 luci-i18n-passwall-zh-cn 包..."
-    
-    # 最新版本信息
-    RELEASE_TAG="26.5.11-1"
-    APP_FILENAME="22.03-_luci-app-passwall_26.5.11_all.ipk"
-    I18N_FILENAME="22.03-_luci-i18n-passwall-zh-cn_26.5.11_all.ipk"
-    
-    # 直接构建下载链接
-    APP_URL="https://github.com/Openwrt-Passwall/openwrt-passwall/releases/download/${RELEASE_TAG}/${APP_FILENAME}"
-    I18N_URL="https://github.com/Openwrt-Passwall/openwrt-passwall/releases/download/${RELEASE_TAG}/${I18N_FILENAME}"
-    
+
+    # 通过 GitHub API 查询 release，拿到真实存在的 asset（兼容 apk / ipk）
+    curl_gh() {
+        if [ -n "$GITHUB_TOKEN" ]; then
+            curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"
+        else
+            curl -fsSL "$@"
+        fi
+    }
+
+    RELEASE_JSON="$(curl_gh "https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest" || true)"
+    if [ -z "$RELEASE_JSON" ] || [ "$RELEASE_JSON" = "null" ]; then
+        echo "错误: 无法获取 Openwrt-Passwall/openwrt-passwall releases 信息"
+        exit 1
+    fi
+
+    # 22.03 优先 ipk；其它（25.x / 24.10+）优先 apk
+    case "$SDK_VERSION" in
+        22.03*|19.07*|18.06*)
+            APP_PATTERN="luci-app-passwall.*\\.ipk$"
+            ;;
+        *)
+            APP_PATTERN="luci-app-passwall.*\\.apk$"
+            ;;
+    esac
+
+    APP_URL="$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$APP_PATTERN\")) | .browser_download_url" | head -n1)"
+    I18N_URL="$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.ipk$")) | .browser_download_url' | head -n1)"
+
+    # 兜底：找不到首选格式时尝试另一种格式
+    if [ -z "$APP_URL" ] || [ "$APP_URL" = "null" ]; then
+        case "$SDK_VERSION" in
+            22.03*|19.07*|18.06*)
+                APP_PATTERN="luci-app-passwall.*\\.apk$"
+                ;;
+            *)
+                APP_PATTERN="luci-app-passwall.*\\.ipk$"
+                ;;
+        esac
+        APP_URL="$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name | test(\"$APP_PATTERN\")) | .browser_download_url" | head -n1)"
+    fi
+
+    if [ -z "$APP_URL" ] || [ "$APP_URL" = "null" ]; then
+        echo "错误: 在 release 中未找到 luci-app-passwall 包"
+        echo "$RELEASE_JSON" | jq -r '.assets[] | .name'
+        exit 1
+    fi
+
+    APP_FILENAME="$(basename "$APP_URL")"
     echo "尝试下载 APP: $APP_URL"
-    if ! curl -fL "$APP_URL" -o "passwall-ipk/$APP_FILENAME"; then
+    if curl -fL "$APP_URL" -o "passwall-ipk/$APP_FILENAME"; then
+        # apk 容器自身有 "ADB" 魔数；兼容 v2 ipk
+        HEAD_BYTES="$(head -c 4 "passwall-ipk/$APP_FILENAME" | od -An -c | tr -d ' ')"
+        if [ "$HEAD_BYTES" != "ADBd" ] && [ "$HEAD_BYTES" != "ADB!" ] && \
+           ! file "passwall-ipk/$APP_FILENAME" | grep -q "gzip\|Debian\|ar archive"; then
+            echo "错误: 下载的文件不是有效的 ipk/apk 包"
+            rm -f "passwall-ipk/$APP_FILENAME"
+            exit 1
+        fi
+        echo "成功下载 APP"
+    else
         echo "错误: 无法下载 luci-app-passwall 包"
         exit 1
     fi
-    echo "成功下载 APP"
-    
-    echo "尝试下载 I18N: $I18N_URL"
-    if curl -fL "$I18N_URL" -o "passwall-ipk/$I18N_FILENAME"; then
-        echo "成功下载 I18N"
+
+    if [ -n "$I18N_URL" ] && [ "$I18N_URL" != "null" ]; then
+        I18N_FILENAME="$(basename "$I18N_URL")"
+        echo "尝试下载 I18N: $I18N_URL"
+        if curl -fL "$I18N_URL" -o "passwall-ipk/$I18N_FILENAME"; then
+            echo "成功下载 I18N"
+        else
+            echo "警告: 无法下载中文语言包，将继续构建但不包含语言包"
+        fi
     else
-        echo "警告: 无法下载中文语言包，将继续构建但不包含语言包"
+        echo "警告: 未找到中文语言包 asset，继续构建但不包含语言包"
     fi
-    
+
     echo "已下载文件："
     ls -lh passwall-ipk/
-    
+
     # 验证至少成功下载了 APP 包
     if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
         echo "错误: passwall-ipk 目录仍然为空"
@@ -72,7 +136,7 @@ echo "架构映射: $ARCH_MAP"
 
 # 定位 luci 包
 echo "定位 luci 包..."
-find_app() { find passwall-ipk -type f -name '*luci-app-passwall*.ipk' | head -n1 || true; }
+find_app() { find passwall-ipk -type f \( -name '*luci-app-passwall*.ipk' -o -name '*luci-app-passwall*.apk' \) 2>/dev/null | head -n1 || true; }
 find_i18n() { find passwall-ipk -type f -name '*luci-i18n-passwall-zh-cn*.ipk' | head -n1 || true; }
 
 APP_PKG="$(find_app)"
@@ -106,7 +170,12 @@ mkdir -p "$DEP_DIR"
 
 APP_BASE="$(basename "$APP_PKG")"
 cp -f "$APP_PKG" "$STAGING_DIR/$APP_BASE"
-cp -f "$APP_PKG" "$STAGING_DIR/luci-app-passwall.ipk"
+# 同时复制一份固定文件名供 install.sh 探测（保留原扩展名 ipk/apk）
+APP_STAGE_NAME="luci-app-passwall.${APP_BASE##*.}"
+cp -f "$APP_PKG" "$STAGING_DIR/$APP_STAGE_NAME"
+
+# 写入 SDK 版本标记，供 install.sh 在路由器上运行时识别
+echo -n "$SDK_VERSION" > "$STAGING_DIR/.sdk_version"
 
 if [ -n "$I18N_PKG" ]; then
   I18N_BASE="$(basename "$I18N_PKG")"
@@ -120,32 +189,67 @@ if [ -d depends ]; then
   cp -r depends/* "$DEP_DIR/"
 fi
 
-# 生成安装脚本
-cat > "$STAGING_DIR/install.sh" <<'EOF'
+# 生成安装脚本（带引号 EOF 禁止 build.sh 阶段展开变量；运行时通过 .sdk_version 注入 SDK 版本）
+cat > "$STAGING_DIR/install.sh" <<'INSTALL_EOF'
 #!/bin/sh
 set -e
+
+# 由构建脚本写入的 SDK 版本标记，用于运行时选择依赖与刷新策略
+SDK_VERSION="$(cat .sdk_version 2>/dev/null || echo @SDK_VERSION@)"
+
+# 探测包管理器：iStoreOS 25 / ImmortalWrt 24.10+ 用 apk(Alpine)，OpenWrt 22.03/官方用 opkg
+PKG_MGR=""
+if command -v apk >/dev/null 2>&1; then
+    PKG_MGR="apk"
+elif command -v opkg >/dev/null 2>&1; then
+    PKG_MGR="opkg"
+fi
+echo "检测到包管理器: ${PKG_MGR:-未找到}"
+
+# 检查依赖是否已安装（按包管理器）
+is_installed() {
+    dep="$1"
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk info -e "$dep" >/dev/null 2>&1
+    else
+        opkg list-installed 2>/dev/null | grep -q "^$dep "
+    fi
+}
+
+# 安装依赖（按包管理器）
+install_dep() {
+    dep="$1"
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk add -q --force-overwrite --clean-protected --allow-untrusted "$dep" 2>/dev/null || echo "警告: 无法安装 $dep"
+    elif [ "$PKG_MGR" = "opkg" ]; then
+        opkg install "$dep" 2>/dev/null || echo "警告: 无法安装 $dep"
+    else
+        echo "错误: 未找到包管理器，无法安装 $dep"
+        return 1
+    fi
+}
 
 # 检查并安装 PassWall 必需依赖
 check_passwall_deps() {
   echo "检查 PassWall 必需依赖..."
-  
+
   # iptables 透明代理模块
   local iptables_deps="iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-conntrack-extra"
   local kernel_deps="kmod-ipt-tproxy kmod-ipt-socket kmod-ipt-iprange kmod-ipt-conntrack-extra"
-  
+
   for dep in $iptables_deps $kernel_deps; do
-    if ! opkg list-installed | grep -q "^$dep "; then
+    if ! is_installed "$dep"; then
       echo "安装缺失依赖: $dep"
-      opkg install "$dep" 2>/dev/null || echo "警告: 无法安装 $dep，可能需要手动处理"
+      install_dep "$dep" || true
     fi
   done
-  
+
   # 其他常用依赖
   local other_deps="ip-full ipset iptables-mod-extra iptables-mod-filter"
   for dep in $other_deps; do
-    if ! opkg list-installed | grep -q "^$dep "; then
+    if ! is_installed "$dep"; then
       echo "安装推荐依赖: $dep"
-      opkg install "$dep" 2>/dev/null || true
+      install_dep "$dep" || true
     fi
   done
 }
@@ -155,7 +259,7 @@ refresh_luci() {
   # 清理缓存文件
   rm -f /tmp/luci-indexcache 2>/dev/null || true
   rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
-  
+
   # 优先使用 luci-reload（如果可用）
   if command -v luci-reload >/dev/null 2>&1; then
     echo "使用 luci-reload 刷新 LuCI..."
@@ -166,7 +270,13 @@ refresh_luci() {
       echo "使用 Lua 重建 LuCI 索引..."
       lua -e 'local ok,d=pcall(require,"luci.dispatcher"); if ok and d then if d.rebuild_index then d.rebuild_index() elseif d.createindex then d.createindex() end end' 2>/dev/null || true
     fi
-    
+
+    # iStoreOS 25 / OpenWrt 24.10+ 使用 ucode 重建索引
+    if command -v ucode >/dev/null 2>&1; then
+      echo "使用 ucode 重建 LuCI 索引..."
+      ucode -e 'require("luci.dispatcher").rebuild_index?.()' 2>/dev/null || true
+    fi
+
     # 温和地重载 HTTP 服务（不重启）
     if [ -x /etc/init.d/uhttpd ]; then
       echo "重载 uhttpd..."
@@ -176,53 +286,108 @@ refresh_luci() {
       echo "重载 nginx..."
       /etc/init.d/nginx reload 2>/dev/null || true
     fi
+    if [ -x /etc/init.d/rpcd ]; then
+      echo "重载 rpcd..."
+      /etc/init.d/rpcd reload 2>/dev/null || true
+    fi
   fi
-  
+
   # 确保文件系统同步
   sync
 }
 
-# 使用固定文件名
-APP_PKG="luci-app-passwall.ipk"
+# 使用固定文件名，自动探测 ipk/apk
+APP_PKG=""
+for f in luci-app-passwall.ipk luci-app-passwall.apk; do
+    if [ -f "$f" ]; then
+        APP_PKG="$f"
+        break
+    fi
+done
 I18N_PKG="luci-i18n-passwall-zh-cn.ipk"
 
-if [ ! -f "$APP_PKG" ]; then
-  echo "错误: 缺少 $APP_PKG"
+if [ -z "$APP_PKG" ]; then
+  echo "错误: 缺少 luci-app-passwall.ipk / .apk"
   ls -l
+  exit 1
+fi
+
+if [ -z "$PKG_MGR" ]; then
+  echo "错误: 未找到包管理器 apk/opkg，请确认路由器系统（需要 OpenWrt/iStoreOS 类系统）"
   exit 1
 fi
 
 # 安装前轻度刷新
 refresh_luci
 
-if ! opkg update; then
-  echo "更新软件源列表错误，请检查路由器网络以及软件源。"
-  exit 1
+# 更新软件源
+if [ "$PKG_MGR" = "apk" ]; then
+    apk update || { echo "apk update 失败，请检查路由器网络以及软件源。"; exit 1; }
+else
+    opkg update || { echo "更新软件源列表错误，请检查路由器网络以及软件源。"; exit 1; }
 fi
 
-# 安装基础依赖（容错）
+# 安装基础依赖（容错，按 SDK 版本分支）
 echo "安装基础依赖..."
-opkg install luci-compat luci-lib-jsonc libuci-lua 2>/dev/null || true
+case "$SDK_VERSION" in
+    22.03*|19.07*|18.06*)
+        install_dep luci-compat 2>/dev/null || true
+        install_dep luci-lib-jsonc 2>/dev/null || true
+        install_dep libuci-lua 2>/dev/null || true
+        ;;
+    *)
+        install_dep luci-lib-jsonc 2>/dev/null || true
+        install_dep libuci-lua 2>/dev/null || true
+        install_dep ucode 2>/dev/null || true
+        install_dep ucode-mod-lua 2>/dev/null || true
+        ;;
+esac
 
 # 检查并安装 PassWall 必需依赖
 check_passwall_deps
 
-# 安装 depends 下的 ipk（若存在）
-if [ -d depends ] && ls depends/*.ipk >/dev/null 2>&1; then
+# 安装 depends 下的 ipk（仅 opkg 环境有效；apk 环境通常用 apk 仓库而非本地 ipk）
+if [ "$PKG_MGR" = "opkg" ] && [ -d depends ] && ls depends/*.ipk >/dev/null 2>&1; then
   echo "安装依赖包..."
   opkg install depends/*.ipk || true
 fi
 
+# 强制更新三大核心为随包附带的最新版本（覆盖路由器上已安装的旧版本）
+for core in xray sing-box hysteria; do
+    core_pkg="$(ls depends/${core}_*.ipk 2>/dev/null | head -n1)"
+    if [ -n "$core_pkg" ]; then
+      echo "更新核心 $core -> $core_pkg"
+      if [ "$PKG_MGR" = "apk" ]; then
+        apk add -q --force-overwrite --clean-protected --allow-untrusted "$core_pkg" 2>/dev/null || true
+      else
+        opkg install "$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
+      fi
+    fi
+done
+
+# 打印核心版本，便于确认
+echo "当前核心版本："
+/usr/bin/xray version 2>/dev/null | head -n1 || true
+/usr/bin/sing-box version 2>/dev/null | head -n1 || true
+/usr/bin/hysteria version 2>/dev/null | head -n2 || true
+
 # 额外常用组件（容错）
 echo "安装额外组件..."
-opkg install haproxy shadowsocks-libev-ss-local shadowsocks-libev-ss-redir shadowsocks-libev-ss-server 2>/dev/null || true
+install_dep haproxy 2>/dev/null || true
+install_dep shadowsocks-libev-ss-local 2>/dev/null || true
+install_dep shadowsocks-libev-ss-redir 2>/dev/null || true
+install_dep shadowsocks-libev-ss-server 2>/dev/null || true
 
 # 始终强制重装，避免版本判断带来的不确定性
 echo "安装 PassWall 主程序..."
-opkg install "$APP_PKG" --force-reinstall || exit 1
+if [ "$PKG_MGR" = "apk" ]; then
+    apk add -q --force-overwrite --clean-protected --allow-untrusted "$APP_PKG" || exit 1
+else
+    opkg install "$APP_PKG" --force-reinstall || exit 1
+fi
 
-# 安装中文语言包（仅本地文件）
-if [ -f "$I18N_PKG" ]; then
+# 安装中文语言包（仅本地文件，仅 opkg 环境）
+if [ "$PKG_MGR" = "opkg" ] && [ -f "$I18N_PKG" ]; then
   echo "安装中文语言包: $I18N_PKG"
   opkg install "$I18N_PKG" || true
 else
@@ -249,14 +414,18 @@ refresh_luci
 echo "验证关键依赖..."
 missing_deps=""
 for dep in iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange; do
-  if ! opkg list-installed | grep -q "^$dep "; then
+  if ! is_installed "$dep"; then
     missing_deps="$missing_deps $dep"
   fi
 done
 
 if [ -n "$missing_deps" ]; then
   echo "警告: 以下依赖未安装，可能影响透明代理功能:$missing_deps"
-  echo "请手动执行: opkg install$missing_deps"
+  if [ "$PKG_MGR" = "apk" ]; then
+    echo "请手动执行: apk add$missing_deps"
+  else
+    echo "请手动执行: opkg install$missing_deps"
+  fi
 fi
 
 # 验证安装结果
@@ -271,8 +440,15 @@ else
   echo "! 警告: 未检测到 PassWall 控制器文件，可能需刷新浏览器或重新登录 LuCI。"
   exit 0
 fi
-EOF
+INSTALL_EOF
 chmod +x "$STAGING_DIR/install.sh"
+
+# 把占位符 @SDK_VERSION@ 替换为构建时的 SDK 版本（兼容 macOS BSD sed）
+if sed --version >/dev/null 2>&1; then
+    sed -i "s|@SDK_VERSION@|$SDK_VERSION|g" "$STAGING_DIR/install.sh"
+else
+    sed -i '' "s|@SDK_VERSION@|$SDK_VERSION|g" "$STAGING_DIR/install.sh"
+fi
 
 OUTPUT="PassWall_${APPVER}_${ARCH_MAP}_all_sdk_${SDK_VERSION}.run"
 LABEL="PassWall_${APPVER}_with_sdk_${SDK_VERSION}_${OPENSSL_TAG}"

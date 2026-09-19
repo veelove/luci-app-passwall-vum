@@ -30,9 +30,16 @@ make help
 | 参数 | 默认值 | 可选值 | 说明 |
 |------|--------|--------|------|
 | `TARGET_ARCH` | `x86_64` | `x86_64`, `aarch64_cortex-a53`, `aarch64_generic` | 目标设备架构 |
-| `SDK_VERSION` | `24.10.6` | - | SDK 版本标记 |
-| `OPENSSL_TAG` | `libopenssl_1.1` | - | OpenSSL 标签 |
+| `SDK_VERSION` | `25.05.0` | - | SDK 版本标记；22.03.x 兼容旧版，25.x 用于 iStoreOS 25 / OpenWrt 24.10+ |
+| `OPENSSL_TAG` | `libopenssl` | - | OpenSSL 标签；OpenSSL 3 用 `libopenssl`，旧版 22.03 用 `libopenssl_1.1` |
 | `BUILD_OPTION` | `standard` | `minimal`, `standard`, `full` | 构建选项 |
+
+> `OPENSSL_TAG` 会按 `SDK_VERSION` 自动校正：22.03.x 自动用 `libopenssl_1.1`，其它默认用 `libopenssl`。
+
+### 支持的目标系统
+
+- **iStoreOS 25 / OpenWrt 24.10+**（默认）：基于 ucode + LuCI 24.x + apk 包管理器（Alpine）；install.sh 自动探测 `apk` 并使用 `apk add --force-overwrite --clean-protected --allow-untrusted`
+- **iStoreOS / OpenWrt 22.03.x**（兼容）：保留 `luci-compat`、`ruby`、`ruby-yaml` 依赖与 opkg 流程；设置 `SDK_VERSION=22.03.7` 即按旧版流程安装 |
 
 ## 使用方法
 
