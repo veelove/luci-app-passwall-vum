@@ -510,11 +510,18 @@ for pkg in haproxy shadowsocks-libev-ss-local shadowsocks-libev-ss-redir shadows
 done
 
 # 安装 PassWall 主程序
+# 关键:apk 工具在装主包时会解析它的 Depends 字段,如果依赖包不在仓库索引里就会失败。
+# depends/*.apk 是我们手工拼的无签名包(只通过 --allow-untrusted 安装),不在 apk 仓库索引中。
+# 所以必须先确保所有依赖都已装上,再装主包。
 echo "安装 PassWall 主程序..."
 if [ "$PKG_MGR" = "apk" ]; then
-    apk add -q --force-overwrite --clean-protected --allow-untrusted "$APP_PKG" || exit 1
+    # 先尝试正常 add,如果因依赖缺失失败,就用 --force-broken-world 强制跳过依赖检查
+    if ! apk add -q --force-overwrite --clean-protected --allow-untrusted "$APP_PKG" 2>/dev/null; then
+        echo "提示:apk 因 Depends 缺失未解析,改用 --force-broken-world 强制装"
+        apk add -q --force-overwrite --clean-protected --allow-untrusted --force-broken-world "$APP_PKG" || exit 1
+    fi
 else
-    opkg install "$APP_PKG" --force-reinstall || exit 1
+    opkg install "$APP_PKG" --force-reinstall --force-depends || exit 1
 fi
 
 # 安装中文语言包（仅本地文件）
