@@ -81,27 +81,23 @@ jobs:
           # 22.03 优先 ipk；其它（25.x / 24.10+）优先 apk
           case "$SDK_VERSION" in
             22.03*|19.07*|18.06*)
-              APP_PATTERN='luci-app-passwall.*\.ipk$'
+              APP_EXT="ipk"
               ;;
             *)
-              APP_PATTERN='luci-app-passwall.*\.apk$'
+              APP_EXT="apk"
               ;;
           esac
 
-          APP_URL=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | test(\"$APP_PATTERN\")) | .browser_download_url" | head -n 1)
+          # 用 jq --arg 传入 pattern，避免 shell 转义与 YAML 双引号字符串转义陷阱
+          APP_URL=$(echo "$RELEASE_DATA" | jq -r --arg ext "$APP_EXT" --arg suffix "$APP_EXT" \
+            '.assets[] | select(.name | test("luci-app-passwall.*\\." + $suffix + "$")) | .browser_download_url' | head -n 1)
           # 兜底：首选格式不存在时尝试另一种
           if [ -z "$APP_URL" ] || [ "$APP_URL" = "null" ]; then
-            case "$SDK_VERSION" in
-              22.03*|19.07*|18.06*)
-                APP_PATTERN='luci-app-passwall.*\.apk$'
-                ;;
-              *)
-                APP_PATTERN='luci-app-passwall.*\.ipk$'
-                ;;
-            esac
-            APP_URL=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | test(\"$APP_PATTERN\")) | .browser_download_url" | head -n 1)
+            if [ "$APP_EXT" = "apk" ]; then FALLBACK_EXT="ipk"; else FALLBACK_EXT="apk"; fi
+            APP_URL=$(echo "$RELEASE_DATA" | jq -r --arg suffix "$FALLBACK_EXT" \
+              '.assets[] | select(.name | test("luci-app-passwall.*\\." + $suffix + "$")) | .browser_download_url' | head -n 1)
           fi
-          I18N_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.ipk$")) | .browser_download_url' | head -n 1)
+          I18N_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.(ipk|apk)$")) | .browser_download_url' | head -n 1)
 
           echo "下载 APP: $APP_URL"
           if [ -z "$APP_URL" ] || [ "$APP_URL" = "null" ]; then
