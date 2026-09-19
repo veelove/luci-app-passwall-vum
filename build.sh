@@ -277,11 +277,21 @@ extract_apk() {
 }
 
 # 从二进制 strings 提取嵌入版本号（用于 hysteria：apk 环境 version 子命令只输出 banner）
+# 多策略：先严格 X.Y.Z；再宽松 vX.Y.Z/-rc/-beta；最后"Version X.Y.Z"嵌入字符串
 extract_binary_version() {
     bin="$1"
     [ -f "$bin" ] || return 1
-    # 用 strings 提取 "X.Y.Z" 形式（排除 Go 依赖伪版本 0.0.0-2024...）
-    strings -a "$bin" 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | grep -v "^0\.0\.0-" | head -n1
+    local ver
+    # 策略 1: 严格 X.Y.Z
+    ver=$(strings -a "$bin" 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | grep -v "^0\.0\.0-" | head -n1)
+    [ -n "$ver" ] && { echo "$ver"; return 0; }
+    # 策略 2: vX.Y.Z 或 X.Y.Z-rc1/-beta
+    ver=$(strings -a "$bin" 2>/dev/null | grep -E "^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$" | grep -v "^v0\.0\.0-" | head -n1 | sed 's/^v//')
+    [ -n "$ver" ] && { echo "$ver"; return 0; }
+    # 策略 3: 嵌入 "Version X.Y.Z" 字符串
+    ver=$(strings -a "$bin" 2>/dev/null | grep -E "Version [0-9]+\.[0-9]+\.[0-9]+" | head -n1 | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -n1)
+    [ -n "$ver" ] && { echo "$ver"; return 0; }
+    return 1
 }
 
 # 检查并安装 PassWall 必需依赖
@@ -432,6 +442,10 @@ done
 # PassWall LuCI 控制器也用 hysteria version 读版本
 if [ "$PKG_MGR" = "apk" ] && [ -x /usr/bin/hysteria ]; then
     HY_VER="$(extract_binary_version /usr/bin/hysteria 2>/dev/null)"
+    # 兜底：尝试从 depends/hysteria_*.ipk 文件名提取版本号
+    if [ -z "$HY_VER" ]; then
+        HY_VER="$(ls depends/hysteria_*.ipk 2>/dev/null | head -n1 | sed -E 's/.*hysteria_([^_]+)_.*/\1/')"
+    fi
     if [ -n "$HY_VER" ]; then
         mv /usr/bin/hysteria /usr/bin/hysteria.bin
         cat > /usr/bin/hysteria <<HYST
@@ -445,6 +459,8 @@ exec /usr/bin/hysteria.bin "\$@"
 HYST
         chmod +x /usr/bin/hysteria
         echo "✓ hysteria wrapper 已安装（version 输出 Version $HY_VER）"
+    else
+        echo "警告: 无法确定 hysteria 版本号，跳过 wrapper 安装"
     fi
 fi
 
