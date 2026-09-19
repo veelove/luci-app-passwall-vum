@@ -251,6 +251,35 @@ extract_ipk() {
     return 1
 }
 
+# 解 apk v2 容器（apk v2 = magic ADBd + 签名段 + control 段 + data 段）
+# 优先用 apk extract（如果可用）；否则用 ar+tar 兜底
+extract_apk() {
+    apk_file="$1"
+    [ -f "$apk_file" ] || return 1
+    # 1) apk extract（OpenWrt/iStoreOS apk-tools fork 提供）
+    if command -v apk >/dev/null 2>&1 && apk extract --help >/dev/null 2>&1; then
+        work="$(mktemp -d)"
+        if (cd "$work" && apk extract "$apk_file" 2>/dev/null); then
+            # apk extract 把 control 段解到 ./.<file>，data 段解到 ./usr/...
+            # 把 data 段（去掉点开头的 control 文件）合并到 /
+            if ls "$work"/.[A-Z]* >/dev/null 2>&1; then
+                cp -f "$work"/.[A-Z]* / 2>/dev/null || true
+            fi
+            # data 段（usr/bin, etc, ...）
+            if [ -d "$work/usr" ]; then
+                cp -rf "$work/usr" / 2>/dev/null || true
+            fi
+            rm -rf "$work"
+            echo "已解包(apk extract): $apk_file -> /"
+            return 0
+        fi
+        rm -rf "$work"
+    fi
+    # 2) 兜底：用 tar/ar 直接尝试（v1 ipk 兼容路径）
+    extract_ipk "$apk_file"
+    return $?
+}
+
 # 检查并安装 PassWall 必需依赖
 check_passwall_deps() {
   echo "检查 PassWall 必需依赖..."
@@ -411,8 +440,8 @@ install_dep shadowsocks-libev-ss-server 2>/dev/null || true
 # 始终强制重装，避免版本判断带来的不确定性
 echo "安装 PassWall 主程序..."
 if [ "$PKG_MGR" = "apk" ]; then
-    # apk 环境：依赖已通过手工解包 depends/ 注入到 /；--no-depends 跳过 apk 的依赖解析
-    apk add -q --force-overwrite --clean-protected --allow-untrusted --no-depends "$APP_PKG" || exit 1
+    # apk 环境：依赖已通过手工解包 depends/ 注入到 /；用 apk extract 绕过 apk 依赖解析
+    extract_apk "$APP_PKG" || exit 1
 else
     opkg install "$APP_PKG" --force-reinstall || exit 1
 fi
@@ -422,7 +451,7 @@ if [ -f "$I18N_PKG" ]; then
   echo "安装中文语言包: $I18N_PKG"
   if [ "$PKG_MGR" = "apk" ]; then
     # apk 环境手工解包 i18n，避免依赖解析
-    extract_ipk "$I18N_PKG" || true
+    extract_apk "$I18N_PKG" || true
   else
     opkg install "$I18N_PKG" || true
   fi
