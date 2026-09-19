@@ -17,8 +17,10 @@ echo "构建选项: $BUILD_OPTION"
 echo "========================================="
 
 # ------------------------------------------------------------------
-# 根据 SDK_VERSION 判断是 .ipk (OpenWrt <= 23.x) 还是 .apk (24.10+/25)
-# OpenWrt 24.10+ 官方主推 apk 格式(.apk),opkg 仍然兼容接收 .apk
+# 根据 SDK_VERSION 判断期望的包格式:
+#   23.x 及更早 -> .ipk / opkg
+#   24.10+ / 25 -> .apk / apk(opkg 兼容)
+# 后面如果 API 探测到的资产格式不一致,会基于实际下载再覆盖 PKG_EXT。
 # ------------------------------------------------------------------
 case "$SDK_VERSION" in
     23.*|22.*|19.*|18.*|17.*|15.*)
@@ -31,7 +33,7 @@ case "$SDK_VERSION" in
         PKG_MGR="apk"
         ;;
 esac
-echo "包格式: .$PKG_EXT  (包管理器: $PKG_MGR)"
+echo "构建期默认包格式: .$PKG_EXT  (包管理器: $PKG_MGR)"
 
 # 准备环境
 echo "准备环境..."
@@ -41,39 +43,130 @@ mkdir -p passwall-ipk artifact/installer staging cores
 # 解析版本主号: 25.00.0 -> 25.00.0  / 24.10.6 -> 24.10.6  / 23.05.5 -> 23.05.5
 SDK_MAJOR="$(echo "$SDK_VERSION" | cut -d. -f1)"
 
-# 上游 luci-app-passwall asset 命名约定:
-#   OpenWrt 22.03.x    -> 22.03-_luci-app-passwall_<ver>_<arch>.ipk
-#   OpenWrt 23.05.x    -> 23.05-_luci-app-passwall_<ver>_<arch>.ipk
-#   OpenWrt 24.10.x    -> 24.10-_luci-app-passwall_<ver>_<arch>.apk
-#   OpenWrt 25.00.0    -> 25.00.0-_luci-app-passwall_<ver>_<arch>.apk
-APP_PREFIX="${SDK_VERSION}-"
-I18N_PREFIX="${SDK_VERSION}-"
-
 # 检查 passwall-ipk 目录是否为空，如果是则下载 luci-app-passwall 主包
 if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
-    echo "passwall-ipk 目录为空,正在从上游下载 luci-app-passwall 包..."
+    echo "passwall-ipk 目录为空,正在通过 GitHub API 探测上游 release asset..."
 
-    # 已知最近版本
-    RELEASE_TAG="26.5.11-1"
+    # 已知最近版本(可在 workflow 中覆盖)
+    RELEASE_TAG="${RELEASE_TAG:-26.5.11-1}"
+    REPO="Openwrt-Passwall/openwrt-passwall"
 
-    APP_FILENAME="${APP_PREFIX}_luci-app-passwall_${RELEASE_TAG%%-*}_all.${PKG_EXT}"
-    I18N_FILENAME="${APP_PREFIX}_luci-i18n-passwall-zh-cn_${RELEASE_TAG%%-*}_all.${PKG_EXT}"
+    # 通过 GitHub API 列出 release 资产,根据 SDK_VERSION + 扩展名选最匹配的 apk/ipk
+    # 优先级(SDK 25.x): 25.x 命名的 apk > 25.12+ 命名的 apk > 其他 apk > ipk
+    # 优先级(SDK 24.10.x): 24.10 命名的 apk > 23.05-24.10 命名的 ipk > 任意 ipk
+    # 优先级(SDK 23.x): 23.05 命名的 ipk > 任意 ipk
+    if command -v jq >/dev/null 2>&1; then
+        if [ -n "$GITHUB_TOKEN" ]; then
+            API_JSON="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}" 2>/dev/null || true)"
+        else
+            API_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}" 2>/dev/null || true)"
+        fi
+        [ -z "$API_JSON" ] && API_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)"
 
-    APP_URL="https://github.com/Openwrt-Passwall/openwrt-passwall/releases/download/${RELEASE_TAG}/${APP_FILENAME}"
-    I18N_URL="https://github.com/Openwrt-Passwall/openwrt-passwall/releases/download/${RELEASE_TAG}/${I18N_FILENAME}"
+        if [ -n "$API_JSON" ]; then
+            # APP 包 URL:luci-app-passwall 主程序
+            # 关键:SDK 25.x 强制只选 .apk(因为 ipk 在 apk 环境下无法正确解析)
+            if [ "$SDK_MAJOR" = "25" ]; then
+                # 优先 25.12+ 命名的真 apk
+                APP_URL="$(echo "$API_JSON" | jq -r '
+                  ( .assets[] | select(
+                      ( .name | test("^25\\.12\\+") )
+                      and ( .name | test("luci-app-passwall") )
+                      and ( .name | test("\\.apk$") )
+                    ) | .browser_download_url ) // empty
+                ' 2>/dev/null | head -n1)"
+                # 次选任何 .apk(用于更新 SDK 数字如 25.05、25.13 时)
+                if [ -z "$APP_URL" ]; then
+                    APP_URL="$(echo "$API_JSON" | jq -r '
+                      ( .assets[] | select(
+                          ( .name | test("luci-app-passwall") )
+                          and ( .name | test("\\.apk$") )
+                        ) | .browser_download_url ) // empty
+                    ' 2>/dev/null | head -n1)"
+                fi
+            else
+                # 23.x / 24.x 优先选 ipk(因为上游没有 24 的 apk,只有 23.05-24.10 的 ipk)
+                APP_URL="$(echo "$API_JSON" | jq -r '
+                  ( .assets[] | select(
+                      ( .name | test("luci-app-passwall") )
+                      and ( .name | test("\\.ipk$") )
+                    ) | .browser_download_url ) // empty
+                ' 2>/dev/null | head -n1)"
+                # 兜底:任何 luci-app-passwall 包
+                if [ -z "$APP_URL" ]; then
+                    APP_URL="$(echo "$API_JSON" | jq -r '
+                      ( .assets[] | select(.name | test("luci-app-passwall")) | .browser_download_url) // empty
+                    ' 2>/dev/null | head -n1)"
+                fi
+            fi
 
-    echo "尝试下载 APP: $APP_URL"
-    if ! curl -fL "$APP_URL" -o "passwall-ipk/$APP_FILENAME"; then
-        echo "错误: 无法下载 luci-app-passwall 包,请检查 SDK_VERSION=${SDK_VERSION} 是否对应上游 asset 命名。"
+            # I18N URL:同样的策略
+            if [ "$SDK_MAJOR" = "25" ]; then
+                I18N_URL="$(echo "$API_JSON" | jq -r '
+                  ( .assets[] | select(
+                      ( .name | test("^25\\.12\\+") )
+                      and ( .name | test("luci-i18n-passwall-zh-cn") )
+                      and ( .name | test("\\.apk$") )
+                    ) | .browser_download_url ) // empty
+                ' 2>/dev/null | head -n1)"
+                if [ -z "$I18N_URL" ]; then
+                    I18N_URL="$(echo "$API_JSON" | jq -r '
+                      ( .assets[] | select(
+                          ( .name | test("luci-i18n-passwall-zh-cn") )
+                          and ( .name | test("\\.apk$") )
+                        ) | .browser_download_url ) // empty
+                    ' 2>/dev/null | head -n1)"
+                fi
+            else
+                I18N_URL="$(echo "$API_JSON" | jq -r '
+                  ( .assets[] | select(
+                      ( .name | test("luci-i18n-passwall-zh-cn") )
+                      and ( .name | test("\\.ipk$") )
+                    ) | .browser_download_url ) // empty
+                ' 2>/dev/null | head -n1)"
+                if [ -z "$I18N_URL" ]; then
+                    I18N_URL="$(echo "$API_JSON" | jq -r '
+                        ( .assets[] | select(.name | test("luci-i18n-passwall-zh-cn")) | .browser_download_url) // empty
+                    ' 2>/dev/null | head -n1)"
+                fi
+            fi
+        fi
+    fi
+
+    # 兜底:没有 jq 或 API 失败时,硬编码已知的 26.5.11-1 命名
+    if [ -z "$APP_URL" ]; then
+        echo "警告: GitHub API 探测失败,使用硬编码 URL 兜底"
+        case "$SDK_VERSION" in
+            25.*)
+                # 25.x 强制只指向真 apk 文件(ADBd 魔数)
+                APP_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/25.12%2B_luci-app-passwall-26.5.11-r1.apk"
+                I18N_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/25.12%2B_luci-i18n-passwall-zh-cn-26.5.11.apk"
+                ;;
+            23.*)
+                APP_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/23.05-24.10_luci-app-passwall_26.5.11-r1_all.ipk"
+                I18N_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/23.05-24.10_luci-i18n-passwall-zh-cn_26.5.11_all.ipk"
+                ;;
+            *)
+                APP_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/22.03-_luci-app-passwall_26.5.11_all.ipk"
+                I18N_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/22.03-_luci-i18n-passwall-zh-cn_26.5.11_all.ipk"
+                ;;
+        esac
+    fi
+
+    echo "APP URL: $APP_URL"
+    if ! curl -fL "$APP_URL" -o "passwall-ipk/$(basename "${APP_URL//%2B/+}")"; then
+        echo "错误: 无法下载 luci-app-passwall 包: $APP_URL"
         exit 1
     fi
     echo "成功下载 APP"
 
-    echo "尝试下载 I18N: $I18N_URL"
-    if curl -fL "$I18N_URL" -o "passwall-ipk/$I18N_FILENAME"; then
-        echo "成功下载 I18N"
-    else
-        echo "警告: 无法下载中文语言包,将继续构建但不包含语言包"
+    if [ -n "$I18N_URL" ]; then
+        echo "I18N URL: $I18N_URL"
+        if curl -fL "$I18N_URL" -o "passwall-ipk/$(basename "${I18N_URL//%2B/+}$")"; then
+            echo "成功下载 I18N"
+        else
+            echo "警告: 无法下载中文语言包,将继续构建但不包含语言包"
+        fi
     fi
 
     echo "已下载文件:"
@@ -86,6 +179,25 @@ if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
 else
     echo "使用本地已有的 luci 包..."
 fi
+
+# ------------------------------------------------------------------
+# 根据实际拿到的 luci-app-passwall 包扩展名,覆盖 PKG_EXT/PKG_MGR
+# (上游 release 资产命名不完全按 SDK 区分,可能 24.10 SDK 拿到 ipk、也可能 25 SDK 拿到 apk)
+# install.sh 会在路由器上运行时探测,但构建期 staging 内的固定文件名要一致。
+# ------------------------------------------------------------------
+APP_EXT_ACTUAL="$(ls passwall-ipk/*luci-app-passwall*.ipk passwall-ipk/*luci-app-passwall*.apk 2>/dev/null | head -n1)"
+APP_EXT_ACTUAL="${APP_EXT_ACTUAL##*.}"
+if [ -n "$APP_EXT_ACTUAL" ]; then
+    if [ "$APP_EXT_ACTUAL" != "$PKG_EXT" ]; then
+        echo "调整:实际下载格式 .$APP_EXT_ACTUAL 覆盖默认 .$PKG_EXT"
+        PKG_EXT="$APP_EXT_ACTUAL"
+        case "$PKG_EXT" in
+            ipk) PKG_MGR="opkg" ;;
+            apk) PKG_MGR="apk" ;;
+        esac
+    fi
+fi
+echo "最终包格式: .$PKG_EXT  (包管理器: $PKG_MGR)"
 
 BUILD_DATE=$(date)
 
@@ -152,6 +264,37 @@ echo -n "$SDK_VERSION" > "$STAGING_DIR/.sdk_version"
 echo "复制依赖包..."
 if [ -d depends ]; then
   cp -r depends/* "$DEP_DIR/"
+
+  # apk 环境需要 .apk 副本(从 ipk 结构中提取 control.tar.gz + data.tar.gz,重新打包)
+  # 局部禁用 set -e,避免子 shell 退出码导致整个循环被中断
+  set +e
+  for src in "$DEP_DIR"/*.ipk; do
+    [ -f "$src" ] || continue
+    base="$(basename "$src" .ipk)"
+    dst="$DEP_DIR/${base}.apk"
+    [ -f "$dst" ] && continue
+    WORK="$(mktemp -d)"
+    tar -xzf "$src" -C "$WORK" 2>/dev/null
+
+    # 情况 A:展开后是 control/ + data/ 目录(罕见)
+    if [ -d "$WORK/control" ] && [ -d "$WORK/data" ]; then
+      tar -czf "$WORK/control.tar.gz" -C "$WORK/control" .
+      tar -czf "$WORK/data.tar.gz"    -C "$WORK/data"    .
+    # 情况 B:展开后直接是 control.tar.gz + data.tar.gz(常见)
+    elif [ -f "$WORK/control.tar.gz" ] && [ -f "$WORK/data.tar.gz" ]; then
+      :  # 已经在 WORK 根目录,无需再处理
+    else
+      echo "  跳过(无法识别结构): $(basename "$src")"
+      rm -rf "$WORK"
+      continue
+    fi
+
+    # 最终 APK = control.tar.gz + data.tar.gz (无签名,依赖 --allow-untrusted)
+    tar -czf "$dst" -C "$WORK" control.tar.gz data.tar.gz
+    echo "  转换依赖: $(basename "$src") -> $(basename "$dst")"
+    rm -rf "$WORK"
+  done
+  set -e
 fi
 
 # ------------------------------------------------------------------
@@ -322,10 +465,18 @@ esac
 
 check_passwall_deps
 
-# 安装 depends 下的依赖（仅 opkg 环境；apk 环境跳过，因为 apk 无法读取 ipk）
-if [ "$PKG_MGR" = "opkg" ] && [ -d depends ] && ls depends/*.ipk >/dev/null 2>&1; then
-    echo "安装依赖包 (opkg)..."
-    opkg install depends/*.ipk || true
+# 安装 depends 下的依赖
+# opkg 环境:装 ipk;apk 环境:装 apk(由 build.sh 在 staging 阶段自动从 ipk 转好的副本)
+if [ -d depends ]; then
+    if [ "$PKG_MGR" = "opkg" ] && ls depends/*.ipk >/dev/null 2>&1; then
+        echo "安装依赖包 (opkg)..."
+        opkg install depends/*.ipk || true
+    elif [ "$PKG_MGR" = "apk" ] && ls depends/*.apk >/dev/null 2>&1; then
+        echo "安装依赖包 (apk)..."
+        for f in depends/*.apk; do
+            apk add -q --force-overwrite --clean-protected --allow-untrusted "$f" 2>/dev/null || true
+        done
+    fi
 fi
 
 # 强制更新三大核心（xray/sing-box/hysteria）为随包附带版本
@@ -337,8 +488,11 @@ for core in xray sing-box hysteria; do
             opkg install "$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
         fi
     else
-        # apk 环境：核心走 luci 主包自带的二进制副本即可，无需单独安装
-        echo "apk 环境: 核心二进制由 PassWall 主包提供"
+        core_pkg="$(ls depends/${core}_*.apk 2>/dev/null | head -n1)"
+        if [ -n "$core_pkg" ]; then
+            echo "更新核心 $core -> $core_pkg"
+            apk add -q --force-overwrite --clean-protected --allow-untrusted "$core_pkg" 2>/dev/null || true
+        fi
     fi
 done
 

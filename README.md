@@ -30,7 +30,7 @@ make help
 | 参数 | 默认值 | 可选值 | 说明 |
 |------|--------|--------|------|
 | `TARGET_ARCH` | `x86_64` | `x86_64`, `aarch64_cortex-a53`, `aarch64_generic` | 目标设备架构 |
-| `SDK_VERSION` | `25.00.0` | `23.05.5` / `24.10.6` / `25.00.0` 等 | SDK 版本标记;主版本决定包格式 (23.x → ipk,24.10+/25 → apk) |
+| `SDK_VERSION` | `25.12.5` | `23.05.5` / `24.10.6` / `25.12.5` 等 | SDK 版本标记;主版本决定包格式 (23.x → ipk,24.10+/25 → apk) |
 | `OPENSSL_TAG` | `libopenssl` | `libopenssl_1.1` (旧版) | OpenSSL 标签;OpenWrt 25 主线统一为 OpenSSL 3 |
 | `BUILD_OPTION` | `standard` | `minimal`, `standard`, `full` | 构建选项 |
 

@@ -15,13 +15,13 @@ on:
           - aarch64_cortex-a53
           - aarch64_generic
       sdk_version:
-        description: 'SDK 版本标记（用于文件名和标签）'
+        description: 'SDK 版本标记(决定 apk/ipk 选择)。24.10+/25.x -> apk;23.x/22.03 -> ipk'
         required: true
-        default: '24.10.6'
+        default: '25.12.5'
       openssl_tag:
-        description: 'OpenSSL 标记（用于标签）'
+        description: 'OpenSSL 标记(25.x/24.10+ 用 libopenssl,23.x/22.03 用 libopenssl_1.1)'
         required: true
-        default: 'libopenssl_1.1'
+        default: 'libopenssl'
       build_option:
         description: '构建选项'
         required: true
@@ -77,14 +77,31 @@ jobs:
           echo "LATEST_VERSION=$LATEST_VERSION" >> "$GITHUB_ENV"
           echo "version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
 
-          # 从 GitHub release 中找到合适的 luci 包（只下载主包，依赖包从仓库复制）
-          APP_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-app-passwall.*\\.ipk$")) | .browser_download_url' | head -n 1)
-          I18N_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.ipk$")) | .browser_download_url' | head -n 1)
+          # 从 GitHub release 中找到合适的 luci 包(根据 SDK_VERSION 优先选 apk 或 ipk)
+          # OpenWrt 24.10+/25.x 优先选 .apk,OpenWrt 23.x 及更早选 .ipk
+          case "${{ inputs.sdk_version }}" in
+              25.*|24.*)
+                  APP_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-app-passwall.*\\.apk$")) | .browser_download_url' | head -n 1)
+                  I18N_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.apk$")) | .browser_download_url' | head -n 1)
+                  ;;
+              *)
+                  APP_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-app-passwall.*\\.ipk$")) | .browser_download_url' | head -n 1)
+                  I18N_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.ipk$")) | .browser_download_url' | head -n 1)
+                  ;;
+          esac
 
-          echo "下载 APP: $APP_URL"
-          curl -fL "$APP_URL" -o passwall-ipk/$(basename "$APP_URL")
-          echo "下载 I18N: $I18N_URL"
-          curl -fL "$I18N_URL" -o passwall-ipk/$(basename "$I18N_URL")
+          if [ -n "$APP_URL" ] && [ "$APP_URL" != "null" ]; then
+            echo "下载 APP: $APP_URL"
+            curl -fL "$APP_URL" -o passwall-ipk/$(basename "$APP_URL")
+          else
+            echo "警告: 未在 release assets 中找到与 SDK_VERSION=${{ inputs.sdk_version }} 匹配的 luci-app-passwall 包"
+          fi
+          if [ -n "$I18N_URL" ] && [ "$I18N_URL" != "null" ]; then
+            echo "下载 I18N: $I18N_URL"
+            curl -fL "$I18N_URL" -o passwall-ipk/$(basename "$I18N_URL")
+          else
+            echo "警告: 未找到匹配的中文语言包"
+          fi
 
           echo "已下载文件："
           ls -lh passwall-ipk/
@@ -96,9 +113,9 @@ jobs:
           curl_gh() { curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
           LATEST_VERSION="${LATEST_VERSION:?need version}"
 
-          # 放宽匹配：不再限定 _all.ipk
-          find_app() { find passwall-ipk -type f -name '*luci-app-passwall*.ipk' | head -n1 || true; }
-          find_i18n() { find passwall-ipk -type f -name '*luci-i18n-passwall-zh-cn*.ipk' | head -n1 || true; }
+          # 放宽匹配：apk 和 ipk 都接受
+          find_app() { find passwall-ipk -type f \( -name '*luci-app-passwall*.ipk' -o -name '*luci-app-passwall*.apk' \) | head -n1 || true; }
+          find_i18n() { find passwall-ipk -type f \( -name '*luci-i18n-passwall-zh-cn*.ipk' -o -name '*luci-i18n-passwall-zh-cn*.apk' \) | head -n1 || true; }
 
           APP_PKG="$(find_app)"; I18N_PKG="$(find_i18n)"
 
@@ -112,13 +129,12 @@ jobs:
             fi
             [ -z "$json" ] && return 0
             if [ -z "$APP_PKG" ]; then
-              # 放宽正则：任意前缀，任意后缀
-              url="$(echo "$json" | jq -r '.assets[] | select(.name|test(".*luci-app-passwall.*\\.ipk$")) | .browser_download_url' | head -n1)"
+              # 放宽正则：任意前缀，apk/ipk 都接受
+              url="$(echo "$json" | jq -r '.assets[] | select(.name|test(".*luci-app-passwall.*\\.(apk|ipk)$")) | .browser_download_url' | head -n1)"
               [ -n "$url" ] && [ "$url" != "null" ] && echo "下载 APP: $url (from $repo/$tag)" && curl -fL "$url" -o "passwall-ipk/$(basename "$url")" && APP_PKG="$(find_app)"
             fi
             if [ -z "$I18N_PKG" ]; then
-              # 放宽正则：任意前缀，任意后缀
-              url="$(echo "$json" | jq -r '.assets[] | select(.name|test(".*luci-i18n-passwall-zh-cn.*\\.ipk$")) | .browser_download_url' | head -n1)"
+              url="$(echo "$json" | jq -r '.assets[] | select(.name|test(".*luci-i18n-passwall-zh-cn.*\\.(apk|ipk)$")) | .browser_download_url' | head -n1)"
               [ -n "$url" ] && [ "$url" != "null" ] && echo "下载 I18N: $url (from $repo/$tag)" && curl -fL "$url" -o "passwall-ipk/$(basename "$url")" && I18N_PKG="$(find_i18n)"
             fi
           }
@@ -136,12 +152,12 @@ jobs:
 
           if [ -z "$APP_PKG" ]; then
             echo "未找到 luci-app-passwall 顶层包"
-            find passwall-ipk -maxdepth 2 -type f -name '*.ipk' -print
+            find passwall-ipk -maxdepth 2 -type f \( -name '*.ipk' -o -name '*.apk' \) -print
             exit 1
           fi
           if [ -z "$I18N_PKG" ]; then
             echo "未找到 zh-cn 语言包"
-            find passwall-ipk -maxdepth 2 -type f -name '*.ipk' -print
+            find passwall-ipk -maxdepth 2 -type f \( -name '*.ipk' -o -name '*.apk' \) -print
             exit 1
           fi
 
@@ -160,8 +176,8 @@ jobs:
           APP_PATH="${APP_PKG_PATH:-${{ steps.locate.outputs.app_path }}}"
           if [ -n "$APP_PATH" ]; then
             BASE="$(basename "$APP_PATH")"
-            # 放宽正则：从任意前缀中提取 luci-app-passwall_XXX 的 XXX
-            APPVER="$(echo "$BASE" | sed -E 's/^.*luci-app-passwall_([^_]+).*\.ipk$/\1/')"
+            # 放宽正则:从任意前缀中提取 luci-app-passwall_<ver>,支持 _all.ipk 和 -<ver>.apk
+            APPVER="$(echo "$BASE" | sed -E 's/^.*luci-app-passwall[_-]([^_.-]+).*/\1/')"
           fi
           if [ -z "${APPVER:-}" ] || [ "$APPVER" = "$BASE" ]; then
             LV="${{ steps.fetch.outputs.version }}"; APPVER="${LV%%-*}"
@@ -205,7 +221,9 @@ jobs:
             tar -C "$d/data" -czf "$d/data.tar.gz" .
             printf '2.0\n' > "$d/debian-binary"
             tar -C "$d" -czf "cores/${name}_${ver}_${ARCH_MAP}.ipk" debian-binary control.tar.gz data.tar.gz
-            echo "已打包: cores/${name}_${ver}_${ARCH_MAP}.ipk"
+            # 同时生成 apk 格式副本(apk 工具链对不带签名的 ipk 结构也能 add)
+            tar -C "$d" -czf "cores/${name}_${ver}_${ARCH_MAP}.apk" control.tar.gz data.tar.gz
+            echo "已打包: cores/${name}_${ver}_${ARCH_MAP}.{ipk,apk}"
           }
 
           # ---------- Xray（上游所有 release 均标记为 prerelease，取列表第一个最新 tag） ----------

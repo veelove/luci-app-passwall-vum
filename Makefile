@@ -4,7 +4,7 @@
 TARGET_ARCH ?= x86_64
 # 默认适配 OpenWrt 25 主线（OpenWrt 24.10+ 已切换到 apk 格式）
 # 如需构建旧版 (OpenWrt 23.x)，请显式指定 SDK_VERSION=23.05.5 OPENSSL_TAG=libopenssl_1.1
-SDK_VERSION ?= 25.00.0
+SDK_VERSION ?= 25.12.5
 # OpenWrt 25 主线 OpenWrt 默认使用 OpenSSL 3 (libopenssl),不再区分 libopenssl_1.1
 OPENSSL_TAG ?= libopenssl
 BUILD_OPTION ?= standard
