@@ -514,12 +514,36 @@ done
 # depends/*.apk 是我们手工拼的无签名包(只通过 --allow-untrusted 安装),不在 apk 仓库索引中。
 # 必须用 --force-broken-world 强制跳过依赖解析(也需 --allow-untrusted 接受未签名)。
 echo "安装 PassWall 主程序..."
+echo "  主包文件: $(ls -la "$APP_PKG" 2>&1)"
 if [ "$PKG_MGR" = "apk" ]; then
-    # 默认直接走强制路径,不去尝试正常 add(Depends 一定不满足)
-    if ! apk add --force-overwrite --clean-protected --allow-untrusted --force-broken-world "$APP_PKG" 2>&1; then
-        echo "错误: apk add 主包失败"
-        ls -la "$APP_PKG" 2>/dev/null
-        exit 1
+    # 先验证 apk add 是否真的接受这个文件。多种参数组合按优先级尝试。
+    INSTALLED=0
+    for opts in \
+        "--force-broken-world --allow-untrusted" \
+        "--no-scripts --force-broken-world --allow-untrusted" \
+        "--force-broken-world --allow-untrusted --virtual .passwall-test" \
+    ; do
+        echo "  尝试: apk add $opts $APP_PKG"
+        if apk add $opts "$APP_PKG" 2>&1 | tail -3; then
+            if apk info -e luci-app-passwall >/dev/null 2>&1; then
+                INSTALLED=1
+                echo "  ✓ 安装成功"
+                break
+            fi
+        fi
+    done
+    if [ $INSTALLED -eq 0 ]; then
+        echo "  ⚠ apk add 多次尝试均失败,改用 .virtual + 手动复制文件"
+        # 终极兜底:用 --virtual 装,把 apk 当作虚拟包的 payload
+        apk add --force-broken-world --allow-untrusted --virtual .luci-app-passwall "$APP_PKG" 2>&1 | tail -3 || true
+        # 检查 controller 是否实际被解包(即使 .virtual 也不影响文件系统)
+        if [ -f /usr/lib/lua/luci/controller/passwall.lua ] || ls /usr/lib/lua/luci/controller/passwall/*.lua >/dev/null 2>&1; then
+            INSTALLED=1
+            echo "  ✓ 文件已就位(虽然 apk 数据库记录可能不一致)"
+        else
+            echo "  ✗ 文件未就位,主包安装彻底失败"
+            exit 1
+        fi
     fi
 else
     opkg install "$APP_PKG" --force-reinstall --force-depends || exit 1
@@ -572,9 +596,15 @@ echo "========================================="
 
 # 列出实际装上的 passwall 相关文件
 echo "[1] PassWall 相关文件:"
-apk info -L luci-app-passwall 2>/dev/null | grep -E "controller|passwall" | head -20 || true
-# 兜底:直接列路径
+echo "  apk 数据库记录:"
+apk info -L luci-app-passwall 2>&1 | head -20 || echo "    (apk info 查询失败)"
+echo "  实际文件路径:"
 find /usr/lib/lua/luci -iname "*passwall*" 2>/dev/null | head -10
+find /etc/config /etc/init.d -iname "*passwall*" 2>/dev/null | head -5
+echo "  init 脚本:"
+ls -la /etc/init.d/passwall* 2>/dev/null
+echo "  config:"
+ls -la /etc/config/passwall* 2>/dev/null
 
 # LuCI 索引重建(更彻底)
 echo ""
@@ -595,12 +625,21 @@ fi
 
 # 最终检查 + 提示
 echo ""
-if [ -f /usr/lib/lua/luci/controller/passwall.lua ] || ls /usr/lib/lua/luci/controller/passwall/*.lua >/dev/null 2>&1 || apk info -L luci-app-passwall 2>/dev/null | grep -q "luci.*passwall"; then
+HAS_FILE=0
+[ -f /usr/lib/lua/luci/controller/passwall.lua ] && HAS_FILE=1
+ls /usr/lib/lua/luci/controller/passwall/*.lua >/dev/null 2>&1 && HAS_FILE=1
+HAS_APK_REC=0
+apk info -L luci-app-passwall 2>/dev/null | grep -q "passwall" && HAS_APK_REC=1
+
+if [ $HAS_FILE -eq 1 ]; then
     echo "✓ 安装完成！请在 LuCI 界面 '服务' 菜单下查看 PassWall。"
     echo "  如果菜单仍未显示,请:"
     echo "    1. 浏览器强制刷新(Ctrl+Shift+R / Cmd+Shift+R)或清除缓存"
     echo "    2. 完全退出 LuCI 后重新登录"
     echo "    3. 执行: rm -f /tmp/luci-indexcache; /etc/init.d/rpcd reload; /etc/init.d/uhttpd reload"
+    if [ $HAS_APK_REC -eq 0 ]; then
+        echo "  注: 主包走 .virtual 路径,apk 数据库无记录,但文件已就位"
+    fi
     [ -z "$missing_deps" ] && echo "  所有必需依赖已正确安装。"
     exit 0
 else
@@ -610,7 +649,7 @@ else
     echo "    ls -la /usr/lib/lua/luci/controller/ | grep -i passwall"
     echo "    ls -la /usr/lib/lua/luci/controller/passwall/ 2>/dev/null"
     echo "    /etc/init.d/rpcd reload && /etc/init.d/uhttpd reload"
-    exit 0
+    exit 1
 fi
 INSTALL_EOF
 chmod +x "$STAGING_DIR/install.sh"
