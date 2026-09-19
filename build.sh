@@ -563,13 +563,52 @@ if [ -n "$missing_deps" ]; then
     echo "请手动执行: $PKG_MGR install $missing_deps"
 fi
 
-if [ -f /usr/lib/lua/luci/controller/passwall.lua ] || ls /usr/lib/lua/luci/controller/passwall/*.lua >/dev/null 2>&1; then
-    echo "✓ 安装完成！请在 LuCI 界面 服务→PassWall 查看。"
-    echo "  如果菜单未显示，请刷新浏览器或重新登录 LuCI。"
+# 验证安装结果 + 排查菜单不见的问题
+echo ""
+echo "========================================="
+echo "安装后自检"
+echo "========================================="
+
+# 列出实际装上的 passwall 相关文件
+echo "[1] PassWall 相关文件:"
+apk info -L luci-app-passwall 2>/dev/null | grep -E "controller|passwall" | head -20 || true
+# 兜底:直接列路径
+find /usr/lib/lua/luci -iname "*passwall*" 2>/dev/null | head -10
+
+# LuCI 索引重建(更彻底)
+echo ""
+echo "[2] 重建 LuCI 索引..."
+rm -f /tmp/luci-indexcache 2>/dev/null || true
+rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
+if command -v ucode >/dev/null 2>&1; then
+    ucode -e 'local d=require("luci.dispatcher"); if d.rebuild_index then d.rebuild_index() end' 2>/dev/null || true
+    ucode -e 'local d=require("luci.dispatcher"); if d.createindex then d.createindex() end' 2>/dev/null || true
+elif command -v lua >/dev/null 2>&1; then
+    lua -e 'local ok,d=pcall(require,"luci.dispatcher"); if ok and d then if d.rebuild_index then d.rebuild_index() elseif d.createindex then d.createindex() end end' 2>/dev/null || true
+fi
+
+# 重载 rpcd/uhttpd(让 controller 重新被扫描)
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload 2>/dev/null || true
+[ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd reload 2>/dev/null || true
+[ -x /etc/init.d/nginx ] && /etc/init.d/nginx reload 2>/dev/null || true
+
+# 最终检查 + 提示
+echo ""
+if [ -f /usr/lib/lua/luci/controller/passwall.lua ] || ls /usr/lib/lua/luci/controller/passwall/*.lua >/dev/null 2>&1 || apk info -L luci-app-passwall 2>/dev/null | grep -q "luci.*passwall"; then
+    echo "✓ 安装完成！请在 LuCI 界面 '服务' 菜单下查看 PassWall。"
+    echo "  如果菜单仍未显示,请:"
+    echo "    1. 浏览器强制刷新(Ctrl+Shift+R / Cmd+Shift+R)或清除缓存"
+    echo "    2. 完全退出 LuCI 后重新登录"
+    echo "    3. 执行: rm -f /tmp/luci-indexcache; /etc/init.d/rpcd reload; /etc/init.d/uhttpd reload"
     [ -z "$missing_deps" ] && echo "  所有必需依赖已正确安装。"
     exit 0
 else
-    echo "! 警告: 未检测到 PassWall 控制器文件，可能需刷新浏览器或重新登录 LuCI。"
+    echo "! 警告: 未检测到 PassWall 控制器文件。"
+    echo "  排查步骤:"
+    echo "    apk info -L luci-app-passwall | grep -E 'controller|passwall'"
+    echo "    ls -la /usr/lib/lua/luci/controller/ | grep -i passwall"
+    echo "    ls -la /usr/lib/lua/luci/controller/passwall/ 2>/dev/null"
+    echo "    /etc/init.d/rpcd reload && /etc/init.d/uhttpd reload"
     exit 0
 fi
 INSTALL_EOF
