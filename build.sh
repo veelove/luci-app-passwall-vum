@@ -512,13 +512,14 @@ done
 # 安装 PassWall 主程序
 # 关键:apk 工具在装主包时会解析它的 Depends 字段,如果依赖包不在仓库索引里就会失败。
 # depends/*.apk 是我们手工拼的无签名包(只通过 --allow-untrusted 安装),不在 apk 仓库索引中。
-# 所以必须先确保所有依赖都已装上,再装主包。
+# 必须用 --force-broken-world 强制跳过依赖解析(也需 --allow-untrusted 接受未签名)。
 echo "安装 PassWall 主程序..."
 if [ "$PKG_MGR" = "apk" ]; then
-    # 先尝试正常 add,如果因依赖缺失失败,就用 --force-broken-world 强制跳过依赖检查
-    if ! apk add -q --force-overwrite --clean-protected --allow-untrusted "$APP_PKG" 2>/dev/null; then
-        echo "提示:apk 因 Depends 缺失未解析,改用 --force-broken-world 强制装"
-        apk add -q --force-overwrite --clean-protected --allow-untrusted --force-broken-world "$APP_PKG" || exit 1
+    # 默认直接走强制路径,不去尝试正常 add(Depends 一定不满足)
+    if ! apk add --force-overwrite --clean-protected --allow-untrusted --force-broken-world "$APP_PKG" 2>&1; then
+        echo "错误: apk add 主包失败"
+        ls -la "$APP_PKG" 2>/dev/null
+        exit 1
     fi
 else
     opkg install "$APP_PKG" --force-reinstall --force-depends || exit 1
