@@ -248,259 +248,59 @@ jobs:
           echo "最新核心打包结果："
           ls -lh cores/
 
-      - name: 构建 Makeself 安装包（完全对齐样例结构/逻辑）
+      - name: 构建 Makeself 安装包（调用统一 build.sh）
         run: |
           set -e
-          ARCH_MAP="${ARCH_MAP:-${{ inputs.target_arch }}}"
-          LATEST_VERSION="${LATEST_VERSION:-${{ steps.fetch.outputs.version }}}"
-          APP_VERSION="${APP_VERSION:-${{ steps.parsever.outputs.appver }}}"
-          SDK_VERSION="${{ inputs.sdk_version }}"
-          OPENSSL_TAG="${{ inputs.openssl_tag }}"
-          APP_PKG_PATH="${APP_PKG_PATH:-${{ steps.locate.outputs.app_path }}}"
-          I18N_PKG_PATH="${I18N_PKG_PATH:-${{ steps.locate.outputs.i18n_path }}}"
+          # 直接复用 build.sh,它内部会根据 SDK_VERSION 自动选 apk/opkg,
+          # 并写入新的 install.sh（运行时探测 apk/opkg）,
+          # 也包含 .sdk_version 标记。workflow 不再内嵌老式 opkg-only 安装脚本。
+          chmod +x build.sh
+          TARGET_ARCH="${{ inputs.target_arch }}" \
+          SDK_VERSION="${{ inputs.sdk_version }}" \
+          OPENSSL_TAG="${{ inputs.openssl_tag }}" \
+          BUILD_OPTION="${{ inputs.build_option }}" \
+          ./build.sh "${{ inputs.target_arch }}" "${{ inputs.sdk_version }}" "${{ inputs.openssl_tag }}" "${{ inputs.build_option }}"
 
-          echo "将打包的顶层包："
-          ls -lh "$APP_PKG_PATH" "$I18N_PKG_PATH"
+          # 在 version.txt 里追加一些 workflow 专属信息
+          {
+            echo "上游Release Tag: ${{ steps.fetch.outputs.version }}"
+            echo "Xray版本: ${{ steps.cores.outputs.xray }}"
+            echo "Sing-Box版本: ${{ steps.cores.outputs.singbox }}"
+            echo "Hysteria版本: ${{ steps.cores.outputs.hysteria }}"
+            echo "构建时间: ${{ steps.date.outputs.date }}"
+            echo "GitHub Actions运行ID: ${{ github.run_id }}"
+          } >> artifact/installer/version.txt 2>/dev/null || true
 
-          STAGING_ROOT="staging"
-          STAGING_DIR="$STAGING_ROOT/$ARCH_MAP"
-          DEP_DIR="$STAGING_DIR/depends"
-          rm -rf "$STAGING_DIR"
-          mkdir -p "$DEP_DIR"
-
-          # 复制为固定文件名，避免通配匹配
-          APP_BASE="$(basename "$APP_PKG_PATH")"
-          I18N_BASE="$(basename "$I18N_PKG_PATH")"
-          cp -f "$APP_PKG_PATH" "$STAGING_DIR/$APP_BASE"
-          cp -f "$APP_PKG_PATH" "$STAGING_DIR/luci-app-passwall.ipk"  # 固定名称
-          cp -f "$I18N_PKG_PATH" "$STAGING_DIR/$I18N_BASE"
-          cp -f "$I18N_PKG_PATH" "$STAGING_DIR/luci-i18n-passwall-zh-cn.ipk"  # 固定名称
-
-          # 复制仓库中的 depends 目录（从老版本提取的完整依赖包）
-          if [ -d depends ]; then
-            echo "复制依赖包..."
-            cp -r depends/* "$DEP_DIR/"
-          fi
-
-          # 用构建时下载的最新核心替换 depends 中的旧版 xray/sing-box/hysteria
-          if ls cores/*.ipk >/dev/null 2>&1; then
-            echo "注入最新核心 ipk（Xray/Sing-Box/Hysteria）..."
-            rm -f "$DEP_DIR"/xray_*.ipk "$DEP_DIR"/sing-box_*.ipk "$DEP_DIR"/hysteria_*.ipk
-            cp -f cores/*.ipk "$DEP_DIR/"
-          fi
-
-          echo "打包目录预览："
-          find "$STAGING_DIR" -maxdepth 2 -type f -print | sed -n '1,200p'
-
-          # 生成安装脚本（恢复原始安装逻辑，直接安装本地依赖）
-          cat > "$STAGING_DIR/install.sh" <<'EOF'
-          #!/bin/sh
-          set -e
-
-          # 检查并安装 PassWall 必需依赖
-          check_passwall_deps() {
-            echo "检查 PassWall 必需依赖..."
-            
-            # iptables 透明代理模块
-            local iptables_deps="iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-conntrack-extra"
-            local kernel_deps="kmod-ipt-tproxy kmod-ipt-socket kmod-ipt-iprange kmod-ipt-conntrack-extra"
-            
-            for dep in $iptables_deps $kernel_deps; do
-              if ! opkg list-installed | grep -q "^$dep "; then
-                echo "安装缺失依赖: $dep"
-                opkg install "$dep" 2>/dev/null || echo "警告: 无法安装 $dep，可能需要手动处理"
-              fi
-            done
-            
-            # 其他常用依赖
-            local other_deps="ip-full ipset iptables-mod-extra iptables-mod-filter"
-            for dep in $other_deps; do
-              if ! opkg list-installed | grep -q "^$dep "; then
-                echo "安装推荐依赖: $dep"
-                opkg install "$dep" 2>/dev/null || true
-              fi
-            done
-          }
-
-          # 温和地刷新 LuCI 缓存（不重启服务，避免丢失登录状态）
-          refresh_luci() {
-            # 清理缓存文件
-            rm -f /tmp/luci-indexcache 2>/dev/null || true
-            rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
-            
-            # 优先使用 luci-reload（如果可用）
-            if command -v luci-reload >/dev/null 2>&1; then
-              echo "使用 luci-reload 刷新 LuCI..."
-              luci-reload 2>/dev/null || true
-            else
-              # 使用 Lua 直接重建索引（兼容不同版本函数名）
-              if command -v lua >/dev/null 2>&1; then
-                echo "使用 Lua 重建 LuCI 索引..."
-                lua -e 'local ok,d=pcall(require,"luci.dispatcher"); if ok and d then if d.rebuild_index then d.rebuild_index() elseif d.createindex then d.createindex() end end' 2>/dev/null || true
-              fi
-              
-              # 温和地重载 HTTP 服务（不重启）
-              if [ -x /etc/init.d/uhttpd ]; then
-                echo "重载 uhttpd..."
-                /etc/init.d/uhttpd reload 2>/dev/null || true
-              fi
-              if [ -x /etc/init.d/nginx ]; then
-                echo "重载 nginx..."
-                /etc/init.d/nginx reload 2>/dev/null || true
-              fi
-            fi
-            
-            # 确保文件系统同步
-            sync
-          }
-
-          # 使用固定文件名，不再通配
-          APP_PKG="luci-app-passwall.ipk"
-          I18N_PKG="luci-i18n-passwall-zh-cn.ipk"
-
-          if [ ! -f "$APP_PKG" ]; then
-            echo "错误: 缺少 $APP_PKG"
-            ls -l
-            exit 1
-          fi
-
-          # 安装前轻度刷新
-          refresh_luci
-
-          if ! opkg update; then
-            echo "更新软件源列表错误，请检查路由器网络以及软件源。"
-            exit 1
-          fi
-
-          # 安装基础依赖（容错）
-          echo "安装基础依赖..."
-          opkg install luci-compat luci-lib-jsonc libuci-lua 2>/dev/null || true
-
-          # 检查并安装 PassWall 必需依赖
-          check_passwall_deps
-
-          # 安装 depends 下的 ipk（若存在）
-          if [ -d depends ] && ls depends/*.ipk >/dev/null 2>&1; then
-            echo "安装依赖包..."
-            opkg install depends/*.ipk || true
-          fi
-
-          # 强制更新三大核心为随包附带的最新版本（覆盖路由器上已安装的旧版本）
-          for core in xray sing-box hysteria; do
-            core_pkg="$(ls depends/${core}_*.ipk 2>/dev/null | head -n1)"
-            if [ -n "$core_pkg" ]; then
-              echo "更新核心 $core -> $core_pkg"
-              opkg install "$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
-            fi
-          done
-
-          # 打印核心版本，便于确认
-          echo "当前核心版本："
-          /usr/bin/xray version 2>/dev/null | head -n1 || true
-          /usr/bin/sing-box version 2>/dev/null | head -n1 || true
-          /usr/bin/hysteria version 2>/dev/null | head -n2 || true
-
-          # 额外常用组件（容错）
-          echo "安装额外组件..."
-          opkg install haproxy shadowsocks-libev-ss-local shadowsocks-libev-ss-redir shadowsocks-libev-ss-server 2>/dev/null || true
-
-          # 始终强制重装，避免版本判断带来的不确定性
-          echo "安装 PassWall 主程序..."
-          opkg install "$APP_PKG" --force-reinstall || exit 1
-
-          # 安装中文语言包（仅本地文件）
-          if [ -f "$I18N_PKG" ]; then
-            echo "安装中文语言包: $I18N_PKG"
-            opkg install "$I18N_PKG" || true
-          else
-            echo "未发现本地中文语言包，跳过安装"
-          fi
-
-          # 启用并启动服务
-          if [ -x /etc/init.d/passwall ]; then
-            echo "启用 PassWall 服务..."
-            /etc/init.d/passwall enable 2>/dev/null || true
-            /etc/init.d/passwall start 2>/dev/null || true
-          fi
-
-          # 重载防火墙（不重启）
-          if [ -x /etc/init.d/firewall ]; then
-            echo "重载防火墙规则..."
-            /etc/init.d/firewall reload 2>/dev/null || true
-          fi
-
-          # 安装后轻度刷新
-          refresh_luci
-
-          # 验证依赖安装情况
-          echo "验证关键依赖..."
-          missing_deps=""
-          for dep in iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange; do
-            if ! opkg list-installed | grep -q "^$dep "; then
-              missing_deps="$missing_deps $dep"
-            fi
-          done
-
-          if [ -n "$missing_deps" ]; then
-            echo "警告: 以下依赖未安装，可能影响透明代理功能:$missing_deps"
-            echo "请手动执行: opkg install$missing_deps"
-          fi
-
-          # 验证安装结果
-          if [ -f /usr/lib/lua/luci/controller/passwall.lua ] || ls /usr/lib/lua/luci/controller/passwall/*.lua >/dev/null 2>&1; then
-            echo "✓ 安装完成！请在 LuCI 界面 服务→PassWall 查看。"
-            echo "  如果菜单未显示，请刷新浏览器或重新登录 LuCI。"
-            if [ -z "$missing_deps" ]; then
-              echo "  所有必需依赖已正确安装。"
-            fi
-            exit 0
-          else
-            echo "! 警告：未检测到 PassWall 控制器文件，可能需刷新浏览器或重新登录 LuCI。"
-            exit 0
-          fi
-          EOF
-          chmod +x "$STAGING_DIR/install.sh"
-
-          OUTPUT="PassWall_${APP_VERSION}_${ARCH_MAP}_all_sdk_${SDK_VERSION}.run"
-          LABEL="PassWall_${APP_VERSION}_with_sdk_${SDK_VERSION}_${OPENSSL_TAG}"
-          makeself --gzip --nox11 "$STAGING_DIR" "$OUTPUT" "$LABEL" ./install.sh
-
-          echo "PassWall(luci-app)版本: $APP_VERSION" > version.txt
-          echo "上游Release Tag: $LATEST_VERSION" >> version.txt
-          echo "Xray版本: ${XRAY_VERSION:-未知}" >> version.txt
-          echo "Sing-Box版本: ${SINGBOX_VERSION:-未知}" >> version.txt
-          echo "Hysteria版本: ${HYSTERIA_VERSION:-未知}" >> version.txt
-          echo "SDK版本: $SDK_VERSION" >> version.txt
-          echo "OpenSSL标记: $OPENSSL_TAG" >> version.txt
-          echo "构建时间: ${{ steps.date.outputs.date }}" >> version.txt
-          echo "目标架构: ${{ inputs.target_arch }}" >> version.txt
-          echo "GitHub Actions运行ID: ${{ github.run_id }}" >> version.txt
-          echo "构建选项: ${{ inputs.build_option }}" >> version.txt
-
-          rm -rf artifact/installer/*
-          mv -f "$OUTPUT" artifact/installer/
-          mv -f version.txt artifact/installer/
-          echo "构建产物："
+          echo "构建产物:"
           ls -lh artifact/installer/
+
+          # 从生成的文件名中解析 APPVER,供后续步骤使用
+          RUN_FILE="$(ls artifact/installer/PassWall_*.run 2>/dev/null | head -n1)"
+          if [ -n "$RUN_FILE" ]; then
+            RUN_BASE="$(basename "$RUN_FILE")"
+            APPVER="$(echo "$RUN_BASE" | sed -E 's/^PassWall_([^_]+)_.*/\1/')"
+            echo "APPVER=$APPVER" >> "$GITHUB_ENV"
+            echo "RUN_FILE=$RUN_FILE" >> "$GITHUB_ENV"
+          fi
 
       - name: 上传安装程序
         uses: actions/upload-artifact@v4
         with:
-          name: PassWall_${{ steps.parsever.outputs.appver }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}
+          name: PassWall_${{ env.APPVER }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}
           path: ./artifact/installer/
 
       - name: 创建发布
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: passwall-${{ inputs.target_arch }}-${{ steps.parsever.outputs.appver }}-${{ github.run_id }}
-          name: PassWall ${{ steps.parsever.outputs.appver }} for iStoreOS (${{ inputs.target_arch }})
+          tag_name: passwall-${{ inputs.target_arch }}-${{ env.APPVER }}-${{ github.run_id }}
+          name: PassWall ${{ env.APPVER }} for iStoreOS (${{ inputs.target_arch }})
           files: |
-            artifact/installer/PassWall_${{ steps.parsever.outputs.appver }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}.run
+            ${{ env.RUN_FILE }}
             artifact/installer/version.txt
           body: |
-            ## PassWall ${{ steps.parsever.outputs.appver }} for iStoreOS - ${{ inputs.target_arch }}
+            ## PassWall ${{ env.APPVER }} for iStoreOS - ${{ inputs.target_arch }}
             
-            PassWall(luci-app)版本: ${{ steps.parsever.outputs.appver }}
+            PassWall(luci-app)版本: ${{ env.APPVER }}
             上游Release Tag: ${{ steps.fetch.outputs.version }}
             Xray版本: ${{ steps.cores.outputs.xray }}
             Sing-Box版本: ${{ steps.cores.outputs.singbox }}
@@ -514,8 +314,8 @@ jobs:
             
             ### 安装方法
             
-            1. 下载 `PassWall_${{ steps.parsever.outputs.appver }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}.run` 到路由器
-            2. 执行 `chmod +x PassWall_${{ steps.parsever.outputs.appver }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}.run && ./PassWall_${{ steps.parsever.outputs.appver }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}.run`
+            1. 下载 `PassWall_${{ env.APPVER }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}.run` 到路由器
+            2. 执行 `chmod +x PassWall_${{ env.APPVER }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}.run && ./PassWall_${{ env.APPVER }}_${{ inputs.target_arch }}_all_sdk_${{ inputs.sdk_version }}.run`
             3. 完成后，在LuCI界面中访问 服务→PassWall
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
