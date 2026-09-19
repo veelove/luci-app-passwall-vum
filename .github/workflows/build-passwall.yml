@@ -417,6 +417,14 @@ jobs:
             return $?
           }
 
+          # 从二进制 strings 提取嵌入版本号（用于 hysteria：apk 环境 version 子命令只输出 banner）
+          extract_binary_version() {
+            bin="$1"
+            [ -f "$bin" ] || return 1
+            # 用 strings 提取 "X.Y.Z" 形式（排除 Go 依赖伪版本 0.0.0-2024...）
+            strings -a "$bin" 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | grep -v "^0\.0\.0-" | head -n1
+          }
+
           # 检查并安装 PassWall 必需依赖
           check_passwall_deps() {
             echo "检查 PassWall 必需依赖..."
@@ -582,14 +590,6 @@ jobs:
           fi
 
           # 打印核心版本，便于确认
-          # hysteria 二进制在 apk 环境下 'version' 子命令只输出 ASCII art banner，
-          # 版本号嵌入在二进制内，需要提取嵌入版本字符串
-          extract_binary_version() {
-            bin="$1"
-            [ -f "$bin" ] || return 1
-            strings -a "$bin" 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | grep -v "^0\.0\.0-" | head -n1
-          }
-
           echo "当前核心版本："
           /usr/bin/xray version 2>/dev/null | head -n1 || true
           /usr/bin/sing-box version 2>/dev/null | head -n1 || true
