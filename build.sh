@@ -220,7 +220,9 @@ is_installed() {
 install_dep() {
     dep="$1"
     if [ "$PKG_MGR" = "apk" ]; then
-        apk add -q --force-overwrite --clean-protected --allow-untrusted "$dep" 2>/dev/null || echo "警告: 无法安装 $dep"
+        # apk 仓库中不一定存在所有 OpenWrt 包（如 shadowsocks-libev-*）；
+        # depends/ 目录已提供 shadowsocks-rust 等替代，因此静默失败即可
+        apk add -q --force-overwrite --clean-protected --allow-untrusted "$dep" 2>/dev/null || true
     elif [ "$PKG_MGR" = "opkg" ]; then
         opkg install "$dep" 2>/dev/null || echo "警告: 无法安装 $dep"
     else
@@ -252,28 +254,22 @@ extract_ipk() {
 }
 
 # 解 apk v2 容器（apk v2 = magic ADBd + 签名段 + control 段 + data 段）
-# 优先用 apk extract（如果可用）；否则用 ar+tar 兜底
+# 优先用 apk extract（OpenWrt 25.12+/iStoreOS apk-tools 支持）；否则用 v1 ipk 解包兜底
 extract_apk() {
     apk_file="$1"
     [ -f "$apk_file" ] || return 1
-    # 1) apk extract（OpenWrt/iStoreOS apk-tools fork 提供）
-    if command -v apk >/dev/null 2>&1 && apk extract --help >/dev/null 2>&1; then
-        work="$(mktemp -d)"
-        if (cd "$work" && apk extract "$apk_file" 2>/dev/null); then
-            # apk extract 把 control 段解到 ./.<file>，data 段解到 ./usr/...
-            # 把 data 段（去掉点开头的 control 文件）合并到 /
-            if ls "$work"/.[A-Z]* >/dev/null 2>&1; then
-                cp -f "$work"/.[A-Z]* / 2>/dev/null || true
-            fi
-            # data 段（usr/bin, etc, ...）
-            if [ -d "$work/usr" ]; then
-                cp -rf "$work/usr" / 2>/dev/null || true
-            fi
-            rm -rf "$work"
+    # 1) apk extract --allow-untrusted --destination / file.apk（直接解到 /）
+    #    iStoreOS 25 / OpenWrt 25.12+ 自带的 apk-tools 都支持此命令，且不触发依赖检查
+    if command -v apk >/dev/null 2>&1; then
+        if apk extract --allow-untrusted --destination / "$apk_file" 2>/dev/null; then
             echo "已解包(apk extract): $apk_file -> /"
             return 0
         fi
-        rm -rf "$work"
+        # 探测输出：apk 不支持 extract 命令则回退
+        if apk extract 2>&1 | grep -q "extract.*Extract package file contents" 2>/dev/null; then
+            # 支持 extract 但 extract 失败（可能签名等其它原因），不要回退
+            echo "警告: apk extract 失败，尝试 v1 ipk 解包"
+        fi
     fi
     # 2) 兜底：用 tar/ar 直接尝试（v1 ipk 兼容路径）
     extract_ipk "$apk_file"
