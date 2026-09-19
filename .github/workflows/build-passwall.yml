@@ -373,6 +373,27 @@ jobs:
             fi
           }
 
+          # 手动解压 v1 ipk（gzip 压缩 control/data）到系统根目录 /，仅在 apk 环境用作依赖逃生通道
+          extract_ipk() {
+            ipk_file="$1"
+            [ -f "$ipk_file" ] || return 1
+            work="$(mktemp -d)"
+            # v1 ipk 是 gzip 压缩流（debian-binary + control.tar.gz + data.tar.gz）
+            if ! gzip -dc "$ipk_file" 2>/dev/null | tar -xf - -C "$work" 2>/dev/null; then
+              rm -rf "$work"
+              echo "警告: $ipk_file 不是 gzip v1 ipk，解包失败"
+              return 1
+            fi
+            if [ -f "$work/data.tar.gz" ]; then
+              tar -xzf "$work/data.tar.gz" -C / 2>/dev/null || true
+              rm -rf "$work"
+              echo "已解包: $ipk_file -> /"
+              return 0
+            fi
+            rm -rf "$work"
+            return 1
+          }
+
           # 检查并安装 PassWall 必需依赖
           check_passwall_deps() {
             echo "检查 PassWall 必需依赖..."
@@ -490,10 +511,18 @@ jobs:
           # 检查并安装 PassWall 必需依赖
           check_passwall_deps
 
-          # 安装 depends 下的 ipk（仅 opkg 环境有效；apk 环境通常用 apk 仓库而非本地 ipk）
-          if [ "$PKG_MGR" = "opkg" ] && [ -d depends ] && ls depends/*.ipk >/dev/null 2>&1; then
-            echo "安装依赖包..."
-            opkg install depends/*.ipk || true
+          # 安装 depends 下的 ipk
+          # opkg 环境直接 opkg install；apk 环境因 apk 仓库没有 PassWall 专用工具，改用手工解包到 /
+          if [ -d depends ] && ls depends/*.ipk >/dev/null 2>&1; then
+            if [ "$PKG_MGR" = "opkg" ]; then
+              echo "安装依赖包..."
+              opkg install depends/*.ipk || true
+            else
+              echo "apk 环境手工解包依赖包到 /..."
+              for ipk in depends/*.ipk; do
+                extract_ipk "$ipk" || true
+              done
+            fi
           fi
 
           # 强制更新三大核心为随包附带的最新版本（覆盖路由器上已安装的旧版本）
@@ -502,7 +531,7 @@ jobs:
             if [ -n "$core_pkg" ]; then
               echo "更新核心 $core -> $core_pkg"
               if [ "$PKG_MGR" = "apk" ]; then
-                apk add -q --force-overwrite --clean-protected --allow-untrusted "$core_pkg" 2>/dev/null || true
+                extract_ipk "$core_pkg" || true
               else
                 opkg install "$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
               fi
@@ -525,15 +554,20 @@ jobs:
           # 始终强制重装，避免版本判断带来的不确定性
           echo "安装 PassWall 主程序..."
           if [ "$PKG_MGR" = "apk" ]; then
-            apk add -q --force-overwrite --clean-protected --allow-untrusted "$APP_PKG" || exit 1
+            # apk 环境：依赖已通过手工解包 depends/ 注入到 /；--no-depends 跳过 apk 的依赖解析
+            apk add -q --force-overwrite --clean-protected --allow-untrusted --no-depends "$APP_PKG" || exit 1
           else
             opkg install "$APP_PKG" --force-reinstall || exit 1
           fi
 
-          # 安装中文语言包（仅本地文件，仅 opkg 环境）
-          if [ "$PKG_MGR" = "opkg" ] && [ -f "$I18N_PKG" ]; then
+          # 安装中文语言包（仅本地文件）
+          if [ -f "$I18N_PKG" ]; then
             echo "安装中文语言包: $I18N_PKG"
-            opkg install "$I18N_PKG" || true
+            if [ "$PKG_MGR" = "apk" ]; then
+              extract_ipk "$I18N_PKG" || true
+            else
+              opkg install "$I18N_PKG" || true
+            fi
           else
             echo "未发现本地中文语言包，跳过安装"
           fi
