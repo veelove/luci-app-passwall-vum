@@ -440,13 +440,25 @@ done
 
 # apk 环境：hysteria version 命令只输出 ASCII art banner，需要写 wrapper 让版本号先输出
 # PassWall LuCI 控制器也用 hysteria version 读版本
-if [ "$PKG_MGR" = "apk" ] && [ -x /usr/bin/hysteria ]; then
-    HY_VER="$(extract_binary_version /usr/bin/hysteria 2>/dev/null)"
-    # 兜底：尝试从 depends/hysteria_*.ipk 文件名提取版本号
-    if [ -z "$HY_VER" ]; then
-        HY_VER="$(ls depends/hysteria_*.ipk 2>/dev/null | head -n1 | sed -E 's/.*hysteria_([^_]+)_.*/\1/')"
+# 优先从 depends/hysteria_*.ipk 文件名提取版本号（最可靠），其次用 strings
+if [ "$PKG_MGR" = "apk" ]; then
+    HY_VER=""
+    # 策略 1: 从 depends 目录文件名提取（最可靠）
+    HY_PKG="$(ls depends/hysteria_*.ipk 2>/dev/null | head -n1)"
+    if [ -n "$HY_PKG" ]; then
+        HY_VER="$(basename "$HY_PKG" | sed -E 's/.*hysteria_([0-9][^_]*)_.*/\1/')"
     fi
-    if [ -n "$HY_VER" ]; then
+    # 策略 2: 用 strings 从二进制提取
+    if [ -z "$HY_VER" ] && [ -x /usr/bin/hysteria ]; then
+        HY_VER="$(extract_binary_version /usr/bin/hysteria 2>/dev/null)"
+    fi
+    # 策略 3: 硬编码兜底（最后手段）
+    if [ -z "$HY_VER" ]; then
+        HY_VER="2.12.3"
+    fi
+
+    # 写 wrapper：覆盖 /usr/bin/hysteria，把 version 子命令的输出加一行真实版本号
+    if [ -x /usr/bin/hysteria ]; then
         mv /usr/bin/hysteria /usr/bin/hysteria.bin
         cat > /usr/bin/hysteria <<HYST
 #!/bin/sh
@@ -460,7 +472,7 @@ HYST
         chmod +x /usr/bin/hysteria
         echo "✓ hysteria wrapper 已安装（version 输出 Version $HY_VER）"
     else
-        echo "警告: 无法确定 hysteria 版本号，跳过 wrapper 安装"
+        echo "警告: /usr/bin/hysteria 不可执行，跳过 wrapper 安装"
     fi
 fi
 
