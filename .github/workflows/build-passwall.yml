@@ -561,11 +561,45 @@ jobs:
             fi
           done
 
+          # apk 环境：hysteria version 命令只输出 ASCII art banner，需要写 wrapper 让版本号先输出
+          # PassWall LuCI 控制器也用 hysteria version 读版本
+          if [ "$PKG_MGR" = "apk" ] && [ -x /usr/bin/hysteria ]; then
+            HY_VER="$(extract_binary_version /usr/bin/hysteria 2>/dev/null)"
+            if [ -n "$HY_VER" ]; then
+              mv /usr/bin/hysteria /usr/bin/hysteria.bin
+              cat > /usr/bin/hysteria <<HYST
+          #!/bin/sh
+          # hysteria wrapper: version subcommand 在 apk 环境下原本只输出 banner
+          # 这里在 banner 前先输出一行真实版本号，方便 PassWall LuCI 解析
+          if [ "\$1" = "version" ]; then
+              echo "Version $HY_VER"
+          fi
+          exec /usr/bin/hysteria.bin "\$@"
+          HYST
+              chmod +x /usr/bin/hysteria
+              echo "✓ hysteria wrapper 已安装（version 输出 Version $HY_VER）"
+            fi
+          fi
+
           # 打印核心版本，便于确认
+          # hysteria 二进制在 apk 环境下 'version' 子命令只输出 ASCII art banner，
+          # 版本号嵌入在二进制内，需要提取嵌入版本字符串
+          extract_binary_version() {
+            bin="$1"
+            [ -f "$bin" ] || return 1
+            strings -a "$bin" 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | grep -v "^0\.0\.0-" | head -n1
+          }
+
           echo "当前核心版本："
           /usr/bin/xray version 2>/dev/null | head -n1 || true
           /usr/bin/sing-box version 2>/dev/null | head -n1 || true
-          /usr/bin/hysteria version 2>/dev/null | head -n2 || true
+          # hysteria: 优先用嵌入版本字符串，回退到 'version' 命令
+          hy_ver="$(extract_binary_version /usr/bin/hysteria 2>/dev/null)"
+          if [ -n "$hy_ver" ]; then
+            echo "Hysteria $hy_ver"
+          else
+            /usr/bin/hysteria version 2>/dev/null | tail -n1 || true
+          fi
 
           # 额外常用组件（容错）
           echo "安装额外组件..."
