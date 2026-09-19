@@ -136,7 +136,7 @@ mkdir -p "$DEP_DIR"
 
 APP_BASE="$(basename "$APP_PKG")"
 cp -f "$APP_PKG" "$STAGING_DIR/$APP_BASE"
-# 固定文件名,install.sh 引用它
+# 固定文件名,install.sh 探测时按可用扩展名选对应那个
 cp -f "$APP_PKG" "$STAGING_DIR/luci-app-passwall.${PKG_EXT}"
 
 if [ -n "$I18N_PKG" ]; then
@@ -145,11 +145,8 @@ if [ -n "$I18N_PKG" ]; then
   cp -f "$I18N_PKG" "$STAGING_DIR/luci-i18n-passwall-zh-cn.${PKG_EXT}"
 fi
 
-# 兼容回退:如果只找到 .ipk 但路由器只有 apk(罕见),仍需放一份 .apk
-# 反之亦然。当源已经是目标格式时,这里是 no-op。
-# 这里我们仅做"找不到时退化":如果构建期选了 .apk 但本地仓库里恰有 .ipk 副本,
-# 也放一份进 staging,保证 opkg-only 系统也能用。但典型场景下不需要,
-# 故保持简单不主动转换。
+# 写入 SDK 版本标记,install.sh 运行时读取以决定依赖集合与刷新策略
+echo -n "$SDK_VERSION" > "$STAGING_DIR/.sdk_version"
 
 # 复制本地的 depends 目录(包含完整依赖)
 echo "复制依赖包..."
@@ -158,150 +155,191 @@ if [ -d depends ]; then
 fi
 
 # ------------------------------------------------------------------
-# OpenWrt 24.10+/25.x 路由器只有 apk,需要 .apk;但 depends 仓库通常是 .ipk。
-# 如果构建期选了 .apk 而 depends 目录里全是 .ipk,我们把 .ipk 重新打成 .apk。
-# 注意:这里生成的 .apk 是"无签名 ipk 结构",apk 工具链会拒绝真正签名校验,
-# 但在多数固件(如 ImmortalWrt / iStoreOS 的 OpenWrt 25 派生版)上可以加
-# --allow-untrusted 接受。本地安装脚本已用 `--force-overwrite` 兜底。
+# 注意:参考 openclash 项目的做法,apk 环境(OpenWrt 24.10+/25)下不安装
+# depends/*.ipk(apk 命令无法读取 ipk 格式)。depends 仅作为 opkg 环境
+# (OpenWrt 23.x) 的兜底,运行时由 install.sh 按 PKG_MGR 决定是否安装。
+# 因此这里不需要做 ipk -> apk 的重打包。
 # ------------------------------------------------------------------
-if [ "$PKG_EXT" = "apk" ]; then
-  echo "为 apk 工具链重打包依赖 .ipk -> .apk..."
-  for src in "$DEP_DIR"/*.ipk; do
-    [ -f "$src" ] || continue
-    base="$(basename "$src" .ipk)"
-    dst="$DEP_DIR/${base}.apk"
-    [ -f "$dst" ] && continue
-    WORK="$(mktemp -d)"
-    mkdir -p "$WORK/control" "$WORK/data"
-    (cd "$WORK" && tar -xzf "$src" 2>/dev/null) || { rm -rf "$WORK"; continue; }
-    if [ -d "$WORK/control" ] && [ -d "$WORK/data" ]; then
-      (cd "$WORK/control" && tar -czf "$WORK/control.tar.gz" .)
-      (cd "$WORK/data"    && tar -czf "$WORK/data.tar.gz"    .)
-      (cd "$WORK" && tar -czf "$dst" control.tar.gz data.tar.gz)
-      echo "  转换: $(basename "$src") -> $(basename "$dst")"
-    fi
-    rm -rf "$WORK"
-  done
-fi
 
 # ------------------------------------------------------------------
 # 生成安装脚本 (opkg/apk 双兼容)
 # OpenWrt 24.10+/25 默认 apk,但仍可执行 opkg 命令(opkg 是 apk 的兼容 shim)
 # ------------------------------------------------------------------
-cat > "$STAGING_DIR/install.sh" <<EOF
+cat > "$STAGING_DIR/install.sh" <<'INSTALL_EOF'
 #!/bin/sh
 set -e
 
-# 构建期记录的预期包格式(.apk for 24.10+/25, .ipk for 23.x)
-PKG_EXT_DEFAULT="$PKG_EXT"
+# 由构建脚本写入的 SDK 版本标记，用于运行时选择依赖与刷新策略
+SDK_VERSION="$(cat .sdk_version 2>/dev/null || echo @SDK_VERSION@)"
 
-# 运行时探测实际可用的包管理器。
-# OpenWrt 24.10+/25.x 默认装 apk,opkg 可能不存在;
-# OpenWrt 23.x 及更早默认装 opkg,apk 可能不存在。
-detect_pkg_mgr() {
-  if command -v apk >/dev/null 2>&1; then
-    echo apk
-  elif command -v opkg >/dev/null 2>&1; then
-    echo opkg
-  else
-    echo ""
-  fi
+# 探测包管理器：iStoreOS 25 / OpenWrt 24.10+ 用 apk(Alpine)；
+# OpenWrt 23.x / 22.03 官方用 opkg。
+PKG_MGR=""
+if command -v apk >/dev/null 2>&1; then
+    PKG_MGR="apk"
+elif command -v opkg >/dev/null 2>&1; then
+    PKG_MGR="opkg"
+fi
+echo "检测到包管理器: ${PKG_MGR:-未找到}"
+
+# 检查依赖是否已安装（按包管理器分支）
+is_installed() {
+    dep="$1"
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk info -e "$dep" >/dev/null 2>&1
+    else
+        opkg list-installed 2>/dev/null | grep -q "^$dep "
+    fi
 }
 
-PKG_MGR="\$(detect_pkg_mgr)"
-if [ -z "\$PKG_MGR" ]; then
-  echo "错误: 系统既找不到 apk 也找不到 opkg,无法继续安装。"
-  exit 1
+# 安装依赖（按包管理器分支）
+install_dep() {
+    dep="$1"
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk add -q --force-overwrite --clean-protected --allow-untrusted "$dep" 2>/dev/null \
+            || echo "警告: 无法安装 $dep"
+    elif [ "$PKG_MGR" = "opkg" ]; then
+        opkg install "$dep" 2>/dev/null \
+            || echo "警告: 无法安装 $dep"
+    else
+        echo "错误: 未找到包管理器，无法安装 $dep"
+        return 1
+    fi
+}
+
+# PassWall 必需依赖
+check_passwall_deps() {
+    echo "检查 PassWall 必需依赖..."
+
+    # 按 SDK 版本挑选基础依赖集合
+    local base_deps=""
+    case "$SDK_VERSION" in
+        22.03*|19.07*|18.06*|23.05*)
+            # 旧版：需要 luci-compat，无 ucode
+            base_deps="luci-compat luci-lib-jsonc libuci-lua coreutils-nohup bash iptables dnsmasq-full curl ca-certificates ipset ip-full iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-extra iptables-mod-filter iptables-mod-conntrack-extra kmod-tun kmod-inet-diag unzip"
+            ;;
+        *)
+            # OpenWrt 24.10+/25：ucode 替代 lua，无 luci-compat
+            base_deps="luci-lib-jsonc libuci-lua ucode ucode-mod-lua coreutils-nohup bash iptables dnsmasq-full curl ca-certificates ipset ip-full iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-extra iptables-mod-filter iptables-mod-conntrack-extra kmod-tun kmod-inet-diag unzip"
+            ;;
+    esac
+
+    local kernel_deps="kmod-ipt-tproxy kmod-ipt-socket kmod-ipt-iprange kmod-ipt-conntrack-extra"
+
+    for dep in $base_deps $kernel_deps; do
+        if ! is_installed "$dep"; then
+            echo "安装缺失依赖: $dep"
+            install_dep "$dep" || true
+        fi
+    done
+}
+
+# 刷新 LuCI 缓存（不重启）
+refresh_luci() {
+    rm -f /tmp/luci-indexcache 2>/dev/null || true
+    rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
+    if command -v luci-reload >/dev/null 2>&1; then
+        luci-reload 2>/dev/null || true
+    else
+        if command -v lua >/dev/null 2>&1; then
+            lua -e 'local ok,d=pcall(require,"luci.dispatcher"); if ok and d then if d.rebuild_index then d.rebuild_index() elseif d.createindex then d.createindex() end end' 2>/dev/null || true
+        fi
+        if command -v ucode >/dev/null 2>&1; then
+            ucode -e 'require("luci.dispatcher").rebuild_index?.()' 2>/dev/null || true
+        fi
+        if [ -x /etc/init.d/uhttpd ]; then
+            /etc/init.d/uhttpd reload 2>/dev/null || true
+        fi
+        if [ -x /etc/init.d/nginx ]; then
+            /etc/init.d/nginx reload 2>/dev/null || true
+        fi
+        if [ -x /etc/init.d/rpcd ]; then
+            /etc/init.d/rpcd reload 2>/dev/null || true
+        fi
+    fi
+    sync
+}
+
+# 主包探测：构建期会把 ipk/apk 都放到 staging(固定名),脚本按可用管理器选对应那个
+APP_PKG=""
+for f in luci-app-passwall.ipk luci-app-passwall.apk; do
+    if [ -f "$f" ]; then
+        APP_PKG="$f"
+        break
+    fi
+done
+I18N_PKG=""
+for f in luci-i18n-passwall-zh-cn.ipk luci-i18n-passwall-zh-cn.apk; do
+    if [ -f "$f" ]; then
+        I18N_PKG="$f"
+        break
+    fi
+done
+
+if [ -z "$APP_PKG" ]; then
+    echo "错误: 缺少 luci-app-passwall.ipk / .apk"
+    ls -l
+    exit 1
 fi
 
-# 实际包后缀:apk 命令接受 .apk,.ipk 命令接受 .ipk。
-# 我们既带 .apk 也带 .ipk(拷贝两份,install.sh 会按可用管理器选对应那个)。
-case "\$PKG_MGR" in
-  apk)  PKG_EXT="apk" ;;
-  opkg) PKG_EXT="ipk" ;;
-esac
-if [ -z "\$PKG_EXT" ] && [ -n "\$PKG_EXT_DEFAULT" ]; then
-  PKG_EXT="\$PKG_EXT_DEFAULT"
+if [ -z "$PKG_MGR" ]; then
+    echo "错误: 未找到包管理器 apk/opkg，请确认路由器系统（需要 OpenWrt/iStoreOS 类系统）"
+    exit 1
 fi
 
 echo "========================================="
 echo "PassWall 安装脚本"
-echo "包管理器: \$PKG_MGR  包格式: .\$PKG_EXT"
+echo "SDK 版本: $SDK_VERSION"
+echo "包管理器: $PKG_MGR"
+echo "主包:     $APP_PKG"
+echo "语言包:   ${I18N_PKG:-无}"
 echo "========================================="
-
-# PassWall 必需依赖
-check_passwall_deps() {
-  echo "检查 PassWall 必需依赖..."
-
-  local iptables_deps="iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-conntrack-extra"
-  local kernel_deps="kmod-ipt-tproxy kmod-ipt-socket kmod-ipt-iprange kmod-ipt-conntrack-extra"
-  local other_deps="ip-full ipset iptables-mod-extra iptables-mod-filter"
-
-  for dep in \$iptables_deps \$kernel_deps \$other_deps; do
-    if ! \$PKG_MGR list-installed 2>/dev/null | grep -q "^\$dep "; then
-      echo "安装缺失依赖: \$dep"
-      \$PKG_MGR install "\$dep" 2>/dev/null || echo "警告: 无法安装 \$dep"
-    fi
-  done
-}
-
-# 刷新 LuCI 缓存(不重启)
-refresh_luci() {
-  rm -f /tmp/luci-indexcache 2>/dev/null || true
-  rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
-  if command -v luci-reload >/dev/null 2>&1; then
-    luci-reload 2>/dev/null || true
-  else
-    if command -v lua >/dev/null 2>&1; then
-      lua -e 'local ok,d=pcall(require,"luci.dispatcher"); if ok and d then if d.rebuild_index then d.rebuild_index() elseif d.createindex then d.createindex() end end' 2>/dev/null || true
-    fi
-    [ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd reload 2>/dev/null || true
-    [ -x /etc/init.d/nginx ]  && /etc/init.d/nginx  reload 2>/dev/null || true
-  fi
-  sync
-}
-
-APP_PKG="luci-app-passwall.\$PKG_EXT"
-I18N_PKG="luci-i18n-passwall-zh-cn.\$PKG_EXT"
-
-if [ ! -f "\$APP_PKG" ]; then
-  echo "错误: 缺少 \$APP_PKG"
-  ls -l
-  exit 1
-fi
 
 refresh_luci
 
-# 更新源(失败不中断)
-\$PKG_MGR update 2>/dev/null || echo "警告: 更新源失败,继续..."
+# 更新软件源
+if [ "$PKG_MGR" = "apk" ]; then
+    apk update || { echo "apk update 失败，请检查路由器网络以及软件源。"; exit 1; }
+else
+    opkg update || { echo "更新软件源列表错误，请检查路由器网络以及软件源。"; exit 1; }
+fi
 
-# 基础依赖
+# 基础依赖（按 SDK 分支）
 echo "安装基础依赖..."
-\$PKG_MGR install luci-compat luci-lib-jsonc libuci-lua 2>/dev/null || true
+case "$SDK_VERSION" in
+    22.03*|19.07*|18.06*|23.05*)
+        install_dep luci-compat 2>/dev/null || true
+        install_dep luci-lib-jsonc 2>/dev/null || true
+        install_dep libuci-lua 2>/dev/null || true
+        ;;
+    *)
+        install_dep luci-lib-jsonc 2>/dev/null || true
+        install_dep libuci-lua 2>/dev/null || true
+        install_dep ucode 2>/dev/null || true
+        install_dep ucode-mod-lua 2>/dev/null || true
+        ;;
+esac
 
 check_passwall_deps
 
-# 安装 depends 下的所有包(支持 .ipk 与 .apk)
-if [ -d depends ]; then
-  echo "安装依赖包..."
-  for f in depends/*.\$PKG_EXT; do
-    [ -f "\$f" ] || continue
-    \$PKG_MGR install "\$f" 2>/dev/null || true
-  done
+# 安装 depends 下的依赖（仅 opkg 环境；apk 环境跳过，因为 apk 无法读取 ipk）
+if [ "$PKG_MGR" = "opkg" ] && [ -d depends ] && ls depends/*.ipk >/dev/null 2>&1; then
+    echo "安装依赖包 (opkg)..."
+    opkg install depends/*.ipk || true
 fi
 
-# 强制更新三大核心(xray/sing-box/hysteria)为随包附带版本
+# 强制更新三大核心（xray/sing-box/hysteria）为随包附带版本
 for core in xray sing-box hysteria; do
-  core_pkg="\$(ls depends/\${core}_*.\$PKG_EXT 2>/dev/null | head -n1)"
-  if [ -n "\$core_pkg" ]; then
-    echo "更新核心 \$core -> \$core_pkg"
-    # apk 与 opkg 选项不完全一致,按管理器分别传入
-    if [ "\$PKG_MGR" = "apk" ]; then
-      \$PKG_MGR add --force-overwrite "\$core_pkg" 2>/dev/null || \$PKG_MGR add "\$core_pkg" 2>/dev/null || true
+    if [ "$PKG_MGR" = "opkg" ]; then
+        core_pkg="$(ls depends/${core}_*.ipk 2>/dev/null | head -n1)"
+        if [ -n "$core_pkg" ]; then
+            echo "更新核心 $core -> $core_pkg"
+            opkg install "$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
+        fi
     else
-      \$PKG_MGR install "\$core_pkg" --force-reinstall --force-overwrite --force-architecture 2>/dev/null || true
+        # apk 环境：核心走 luci 主包自带的二进制副本即可，无需单独安装
+        echo "apk 环境: 核心二进制由 PassWall 主包提供"
     fi
-  fi
 done
 
 echo "当前核心版本:"
@@ -309,33 +347,44 @@ echo "当前核心版本:"
 /usr/bin/sing-box version 2>/dev/null | head -n1 || true
 /usr/bin/hysteria version 2>/dev/null | head -n2 || true
 
-# 额外组件
+# 额外常用组件（apk/opkg 各自兜底）
 echo "安装额外组件..."
-\$PKG_MGR install haproxy shadowsocks-libev-ss-local shadowsocks-libev-ss-redir shadowsocks-libev-ss-server 2>/dev/null || true
+for pkg in haproxy shadowsocks-libev-ss-local shadowsocks-libev-ss-redir shadowsocks-libev-ss-server; do
+    if ! is_installed "$pkg"; then
+        install_dep "$pkg" || true
+    fi
+done
 
-# 强制重装 PassWall 主程序
+# 安装 PassWall 主程序
 echo "安装 PassWall 主程序..."
-if [ "\$PKG_MGR" = "apk" ]; then
-  \$PKG_MGR add --force-overwrite "\$APP_PKG" || \$PKG_MGR add "\$APP_PKG" || exit 1
+if [ "$PKG_MGR" = "apk" ]; then
+    apk add -q --force-overwrite --clean-protected --allow-untrusted "$APP_PKG" || exit 1
 else
-  \$PKG_MGR install "\$APP_PKG" --force-reinstall || exit 1
+    opkg install "$APP_PKG" --force-reinstall || exit 1
 fi
 
-# 语言包
-if [ -f "\$I18N_PKG" ]; then
-  echo "安装中文语言包: \$I18N_PKG"
-  \$PKG_MGR install "\$I18N_PKG" 2>/dev/null || true
+# 安装中文语言包（仅本地文件）
+if [ -n "$I18N_PKG" ]; then
+    echo "安装中文语言包: $I18N_PKG"
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk add -q --force-overwrite --clean-protected --allow-untrusted "$I18N_PKG" 2>/dev/null || true
+    else
+        opkg install "$I18N_PKG" 2>/dev/null || true
+    fi
 else
-  echo "未发现本地中文语言包,跳过"
+    echo "未发现本地中文语言包，跳过"
 fi
 
+# 启用并启动服务
 if [ -x /etc/init.d/passwall ]; then
-  /etc/init.d/passwall enable 2>/dev/null || true
-  /etc/init.d/passwall start 2>/dev/null || true
+    echo "启用 PassWall 服务..."
+    /etc/init.d/passwall enable 2>/dev/null || true
+    /etc/init.d/passwall start 2>/dev/null || true
 fi
 
 if [ -x /etc/init.d/firewall ]; then
-  /etc/init.d/firewall reload 2>/dev/null || true
+    echo "重载防火墙规则..."
+    /etc/init.d/firewall reload 2>/dev/null || true
 fi
 
 refresh_luci
@@ -343,26 +392,34 @@ refresh_luci
 # 依赖校验
 missing_deps=""
 for dep in iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange; do
-  if ! \$PKG_MGR list-installed 2>/dev/null | grep -q "^\$dep "; then
-    missing_deps="\$missing_deps \$dep"
-  fi
+    if ! is_installed "$dep"; then
+        missing_deps="$missing_deps $dep"
+    fi
 done
 
-if [ -n "\$missing_deps" ]; then
-  echo "警告: 以下依赖未安装:\$missing_deps"
-  echo "请手动执行: \$PKG_MGR install \$missing_deps"
+if [ -n "$missing_deps" ]; then
+    echo "警告: 以下依赖未安装:$missing_deps"
+    echo "请手动执行: $PKG_MGR install $missing_deps"
 fi
 
 if [ -f /usr/lib/lua/luci/controller/passwall.lua ] || ls /usr/lib/lua/luci/controller/passwall/*.lua >/dev/null 2>&1; then
-  echo "✓ 安装完成!请在 LuCI 界面 服务→PassWall 查看。"
-  [ -z "\$missing_deps" ] && echo "  所有必需依赖已正确安装。"
-  exit 0
+    echo "✓ 安装完成！请在 LuCI 界面 服务→PassWall 查看。"
+    echo "  如果菜单未显示，请刷新浏览器或重新登录 LuCI。"
+    [ -z "$missing_deps" ] && echo "  所有必需依赖已正确安装。"
+    exit 0
 else
-  echo "! 警告: 未检测到 PassWall 控制器文件,可能需刷新浏览器。"
-  exit 0
+    echo "! 警告: 未检测到 PassWall 控制器文件，可能需刷新浏览器或重新登录 LuCI。"
+    exit 0
 fi
-EOF
+INSTALL_EOF
 chmod +x "$STAGING_DIR/install.sh"
+
+# 把占位符 @SDK_VERSION@ 替换为构建时的 SDK 版本(兼容 macOS BSD sed)
+if sed --version >/dev/null 2>&1; then
+    sed -i "s|@SDK_VERSION@|$SDK_VERSION|g" "$STAGING_DIR/install.sh"
+else
+    sed -i '' "s|@SDK_VERSION@|$SDK_VERSION|g" "$STAGING_DIR/install.sh"
+fi
 
 OUTPUT="PassWall_${APPVER}_${ARCH_MAP}_all_sdk_${SDK_VERSION}.run"
 LABEL="PassWall_${APPVER}_with_sdk_${SDK_VERSION}_${OPENSSL_TAG}_${PKG_EXT}"
