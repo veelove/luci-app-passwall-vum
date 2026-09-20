@@ -175,7 +175,8 @@ if [ -d depends ]; then
 fi
 
 # 25.x / OpenWrt 25.12+ 使用 apk 包管理器，而 depends 下为 ipk（opkg 格式）。
-# apk 无法直接安装 ipk，需在构建时转换为 apk（.PKGINFO + data.tar.gz）。
+# apk 无法直接安装 ipk，需在构建时转换为 apk v2 格式。
+# APK v2 结构 = gzip(control 段：含 .PKGINFO 的 tar，无结尾 null 块) + gzip(data 段：原始 data.tar.gz)。
 # 兼容两种 ipk 容器：旧式 ar 归档（!<arch>）与新式 gzip tar 容器（内部含 data.tar.gz/control.tar.gz）。
 convert_depends_to_apk() {
   echo "SDK_VERSION=$SDK_VERSION 为 25.x，转换 depends/*.ipk -> .apk..."
@@ -183,8 +184,8 @@ convert_depends_to_apk() {
   work="$(mktemp -d)"
   for ipk in "$DEP_DIR"/*.ipk; do
     [ -f "$ipk" ] || continue
-    python3 - "$ipk" "$work" <<'PYEOF'
-import sys, tarfile, io, os
+    python3 - "$ipk" <<'PYEOF'
+import sys, tarfile, io, gzip
 
 def read_ar_member(path, wanted):
     """读取 ar 归档中的指定成员（data.tar.gz / control.tar.gz），返回 bytes"""
@@ -243,7 +244,6 @@ def control_to_pkginfo(control_text):
     return '\n'.join(lines) + '\n'
 
 src = sys.argv[1]
-work = sys.argv[2]
 data = extract_member(src, 'data.tar.gz')
 if data is None:
     print('跳过（无 data.tar.gz）: %s' % src)
@@ -260,16 +260,24 @@ if control_tar:
     except Exception:
         pass
 pkginfo = control_to_pkginfo(control_text)
+
+# APK v2: control 段（含 .PKGINFO 的 tar，无结尾 null 块，gzip）+ data 段（原 data.tar.gz 原样）
+buf = io.BytesIO()
+t = tarfile.open(fileobj=buf, mode='w', format=tarfile.USTAR_FORMAT)
+info = tarfile.TarInfo('.PKGINFO')
+info.size = len(pkginfo.encode('utf-8'))
+info.mode = 0o644
+t.addfile(info, io.BytesIO(pkginfo.encode('utf-8')))
+t.close()
+control_tar_bytes = buf.getvalue()
+control_segment = control_tar_bytes[:-1024]
+control_gz = gzip.compress(control_segment)
+
 name = src.rsplit('/', 1)[-1]
 dst = src.rsplit('.', 1)[0] + '.apk'
 with open(dst, 'wb') as f:
-    with tarfile.open(fileobj=f, mode='w:gz') as t:
-        info = tarfile.TarInfo('.PKGINFO')
-        info.size = len(pkginfo.encode('utf-8'))
-        t.addfile(info, io.BytesIO(pkginfo.encode('utf-8')))
-        dinfo = tarfile.TarInfo('data.tar.gz')
-        dinfo.size = len(data)
-        t.addfile(dinfo, io.BytesIO(data))
+    f.write(control_gz)
+    f.write(data)
 print('已转换: %s -> %s' % (name, dst.rsplit('/', 1)[-1]))
 PYEOF
   done
