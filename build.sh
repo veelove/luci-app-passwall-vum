@@ -176,7 +176,7 @@ fi
 
 # 25.x / OpenWrt 25.12+ 使用 apk 包管理器，而 depends 下为 ipk（opkg 格式）。
 # apk 无法直接安装 ipk，需在构建时转换为 apk v2 格式。
-# APK v2 结构 = gzip(control 段：含 .PKGINFO 的 tar，无结尾 null 块) + gzip(data 段：原始 data.tar.gz)。
+# APK v2 结构 = 单个 gzip tar，含 .PKGINFO 元数据 + 数据文件直接平铺（无 data.tar.gz 嵌套）。
 # 兼容两种 ipk 容器：旧式 ar 归档（!<arch>）与新式 gzip tar 容器（内部含 data.tar.gz/control.tar.gz）。
 convert_depends_to_apk() {
   echo "SDK_VERSION=$SDK_VERSION 为 25.x，转换 depends/*.ipk -> .apk..."
@@ -237,10 +237,11 @@ def control_to_pkginfo(control_text):
     add('url', fields.get('URL'))
     add('maintainer', fields.get('Maintainer'))
     add('license', fields.get('License'))
+    # ipk 的 Depends 是逗号分隔，转成 apk 的 depend = 每行一个
     for d in fields.get('Depends', '').split(','):
         d = d.strip()
         if d:
-            lines.append('depends = %s' % d.split()[0])
+            lines.append('depend = %s' % d.split()[0])
     return '\n'.join(lines) + '\n'
 
 src = sys.argv[1]
@@ -261,23 +262,29 @@ if control_tar:
         pass
 pkginfo = control_to_pkginfo(control_text)
 
-# APK v2: control 段（含 .PKGINFO 的 tar，无结尾 null 块，gzip）+ data 段（原 data.tar.gz 原样）
+# 构建 apk v2：单个 gzip tar，.PKGINFO + 数据文件平铺
 buf = io.BytesIO()
 t = tarfile.open(fileobj=buf, mode='w', format=tarfile.USTAR_FORMAT)
 info = tarfile.TarInfo('.PKGINFO')
 info.size = len(pkginfo.encode('utf-8'))
 info.mode = 0o644
 t.addfile(info, io.BytesIO(pkginfo.encode('utf-8')))
+# 解出 ipk 的 data.tar.gz，把其中文件平铺进 apk（保留权限/属主）
+dt = tarfile.open(fileobj=io.BytesIO(data), mode='r:gz')
+for m in dt.getmembers():
+    if m.isfile() or m.islnk() or m.issym():
+        try:
+            t.addfile(m, dt.extractfile(m))
+        except Exception:
+            t.addfile(m)
+    else:
+        t.addfile(m)
 t.close()
-control_tar_bytes = buf.getvalue()
-control_segment = control_tar_bytes[:-1024]
-control_gz = gzip.compress(control_segment)
 
 name = src.rsplit('/', 1)[-1]
 dst = src.rsplit('.', 1)[0] + '.apk'
 with open(dst, 'wb') as f:
-    f.write(control_gz)
-    f.write(data)
+    f.write(gzip.compress(buf.getvalue()))
 print('已转换: %s -> %s' % (name, dst.rsplit('/', 1)[-1]))
 PYEOF
   done
