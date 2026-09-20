@@ -174,6 +174,116 @@ if [ -d depends ]; then
   cp -r depends/* "$DEP_DIR/"
 fi
 
+# 25.x / OpenWrt 25.12+ 使用 apk 包管理器，而 depends 下为 ipk（opkg 格式）。
+# apk 无法直接安装 ipk，需在构建时转换为 apk（.PKGINFO + data.tar.gz）。
+# 兼容两种 ipk 容器：旧式 ar 归档（!<arch>）与新式 gzip tar 容器（内部含 data.tar.gz/control.tar.gz）。
+convert_depends_to_apk() {
+  echo "SDK_VERSION=$SDK_VERSION 为 25.x，转换 depends/*.ipk -> .apk..."
+  local work
+  work="$(mktemp -d)"
+  for ipk in "$DEP_DIR"/*.ipk; do
+    [ -f "$ipk" ] || continue
+    python3 - "$ipk" "$work" <<'PYEOF'
+import sys, tarfile, io, os
+
+def read_ar_member(path, wanted):
+    """读取 ar 归档中的指定成员（data.tar.gz / control.tar.gz），返回 bytes"""
+    with open(path, 'rb') as f:
+        data = f.read()
+    if not data.startswith(b'!<arch>\n'):
+        return None
+    off, members = 8, {}
+    while off + 60 <= len(data):
+        name = data[off:off+16].decode().strip()
+        size = int(data[off+48:off+58].decode().strip())
+        body = data[off+60:off+60+size]
+        members[name.rstrip('/')] = body
+        off += 60 + size + (size & 1)
+    return members.get(wanted)
+
+def read_tar_member(path, wanted):
+    """读取 gzip tar 容器中的指定成员（./data.tar.gz / ./control.tar.gz），返回 bytes"""
+    try:
+        t = tarfile.open(path, mode='r:gz')
+    except Exception:
+        return None
+    for m in t.getmembers():
+        if m.name.rstrip('/').endswith(wanted):
+            return t.extractfile(m).read()
+    return None
+
+def extract_member(path, wanted):
+    b = read_ar_member(path, wanted)
+    if b is not None:
+        return b
+    return read_tar_member(path, wanted)
+
+def control_to_pkginfo(control_text):
+    fields = {}
+    for line in control_text.splitlines():
+        if ':' in line:
+            k, v = line.split(':', 1)
+            fields[k.strip()] = v.strip()
+    lines = []
+    def add(k, v):
+        if v:
+            lines.append('%s = %s' % (k, v))
+    add('pkgname', fields.get('Package'))
+    add('pkgver', fields.get('Version'))
+    add('arch', fields.get('Architecture'))
+    add('origin', fields.get('Package'))
+    add('pkgdesc', fields.get('Description'))
+    add('url', fields.get('URL'))
+    add('maintainer', fields.get('Maintainer'))
+    add('license', fields.get('License'))
+    for d in fields.get('Depends', '').split(','):
+        d = d.strip()
+        if d:
+            lines.append('depends = %s' % d.split()[0])
+    return '\n'.join(lines) + '\n'
+
+src = sys.argv[1]
+work = sys.argv[2]
+data = extract_member(src, 'data.tar.gz')
+if data is None:
+    print('跳过（无 data.tar.gz）: %s' % src)
+    sys.exit(0)
+control_tar = extract_member(src, 'control.tar.gz')
+control_text = ''
+if control_tar:
+    try:
+        ct = tarfile.open(fileobj=io.BytesIO(control_tar), mode='r:gz')
+        for m in ct.getmembers():
+            if m.name.rstrip('/').endswith('/control') or m.name.rstrip('/') == 'control':
+                control_text = ct.extractfile(m).read().decode('utf-8', 'replace')
+                break
+    except Exception:
+        pass
+pkginfo = control_to_pkginfo(control_text)
+name = src.rsplit('/', 1)[-1]
+dst = src.rsplit('.', 1)[0] + '.apk'
+with open(dst, 'wb') as f:
+    with tarfile.open(fileobj=f, mode='w:gz') as t:
+        info = tarfile.TarInfo('.PKGINFO')
+        info.size = len(pkginfo.encode('utf-8'))
+        t.addfile(info, io.BytesIO(pkginfo.encode('utf-8')))
+        dinfo = tarfile.TarInfo('data.tar.gz')
+        dinfo.size = len(data)
+        t.addfile(dinfo, io.BytesIO(data))
+print('已转换: %s -> %s' % (name, dst.rsplit('/', 1)[-1]))
+PYEOF
+  done
+  rm -rf "$work"
+}
+
+# 22.03 / 23.05 / 24.10 仍用 opkg+ipk，仅 25.x 需要 ipk->apk
+case "$SDK_VERSION" in
+  22.03*|19.07*|18.06*|23.05*|24.10*) ;;
+  *)
+    convert_depends_to_apk
+    ;;
+esac
+
 # 生成安装脚本
 cat > "$STAGING_DIR/install.sh" <<'EOF'
 #!/bin/sh
