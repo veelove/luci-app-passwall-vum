@@ -33,70 +33,134 @@ mkdir -p passwall-ipk artifact/installer staging
 
 # 检查 passwall-ipk 目录是否为空，如果是则下载 IPK/APK 包
 if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
-    echo "passwall-ipk 目录为空，正在从上游 Release 下载 luci-app-passwall 和语言包..."
+    echo "passwall-ipk 目录为空，正在下载 luci-app-passwall 及相关依赖..."
 
-    curl_gh() {
-        if [ -n "$GITHUB_TOKEN" ]; then
-            curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"
-        else
-            curl -fsSL "$@"
-        fi
-    }
-
-    # 获取最新版本信息
-    API_LATEST="https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest"
-    RELEASE_DATA="$(curl_gh "$API_LATEST" 2>/dev/null || true)"
-    RELEASE_TAG="$(echo "$RELEASE_DATA" | jq -r .tag_name 2>/dev/null || true)"
-    if [ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "null" ]; then
-        echo "获取 latest release 失败，尝试从所有 releases 获取..."
-        RELEASE_DATA="$(curl_gh "https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases" 2>/dev/null || true)"
-        RELEASE_TAG="$(echo "$RELEASE_DATA" | jq -r '.[0].tag_name' 2>/dev/null || true)"
-    fi
-    [ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "null" ] && RELEASE_TAG="26.9.16-1"
-    echo "检测到的版本: $RELEASE_TAG"
-
-    # 按 SDK 版本选择资产匹配规则：
-    #  22.03*          -> 22.03- 前缀 ipk
-    #  23.05* / 24.10* -> 23.05-24.10 前缀 ipk
-    #  25.* / 其它     -> 25.12+ 前缀 apk
+    # 按 SDK 版本分支：
+    #  22.03 / 23.05 / 24.10  -> GitHub Release 的 ipk（opkg 安装）
+    #  25.x / 其它            -> 上游 openwrt-passwall-build 的 apk（SourceForge，apk 安装）
     case "$SDK_VERSION" in
-        22.03*|19.07*|18.06*)
-            APP_PAT='^22\.03-.*luci-app-passwall.*\.ipk$'
-            I18N_PAT='^22\.03-.*luci-i18n-passwall-zh-cn.*\.ipk$'
-            ;;
-        23.05*|24.10*)
-            APP_PAT='^23\.05-24\.10.*luci-app-passwall.*\.ipk$'
-            I18N_PAT='^23\.05-24\.10.*luci-i18n-passwall-zh-cn.*\.ipk$'
+        22.03*|19.07*|18.06*|23.05*|24.10*)
+            curl_gh() {
+                if [ -n "$GITHUB_TOKEN" ]; then
+                    curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"
+                else
+                    curl -fsSL "$@"
+                fi
+            }
+
+            # 获取最新版本信息
+            API_LATEST="https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest"
+            RELEASE_DATA="$(curl_gh "$API_LATEST" 2>/dev/null || true)"
+            RELEASE_TAG="$(echo "$RELEASE_DATA" | jq -r .tag_name 2>/dev/null || true)"
+            if [ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "null" ]; then
+                echo "获取 latest release 失败，尝试从所有 releases 获取..."
+                RELEASE_DATA="$(curl_gh "https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases" 2>/dev/null || true)"
+                RELEASE_TAG="$(echo "$RELEASE_DATA" | jq -r '.[0].tag_name' 2>/dev/null || true)"
+            fi
+            [ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "null" ] && RELEASE_TAG="26.9.16-1"
+            echo "检测到的版本: $RELEASE_TAG"
+
+            # 按 SDK 版本选择资产匹配规则：
+            #  22.03*          -> 22.03- 前缀 ipk
+            #  23.05* / 24.10* -> 23.05-24.10 前缀 ipk
+            case "$SDK_VERSION" in
+                22.03*|19.07*|18.06*)
+                    APP_PAT='^22\.03-.*luci-app-passwall.*\.ipk$'
+                    I18N_PAT='^22\.03-.*luci-i18n-passwall-zh-cn.*\.ipk$'
+                    ;;
+                *)
+                    APP_PAT='^23\.05-24\.10.*luci-app-passwall.*\.ipk$'
+                    I18N_PAT='^23\.05-24\.10.*luci-i18n-passwall-zh-cn.*\.ipk$'
+                    ;;
+            esac
+
+            APP_URL="$(echo "$RELEASE_DATA" | jq -r --arg pat "$APP_PAT" '.assets[] | select(.name | test($pat)) | .browser_download_url' | head -n 1)"
+            I18N_URL="$(echo "$RELEASE_DATA" | jq -r --arg pat "$I18N_PAT" '.assets[] | select(.name | test($pat)) | .browser_download_url' | head -n 1)"
+
+            if [ -z "$APP_URL" ] || [ "$APP_URL" = "null" ]; then
+                echo "警告: SDK_VERSION=$SDK_VERSION 未匹配到对应格式，回退到通用匹配..."
+                APP_URL="$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-app-passwall.*\\.ipk$")) | .browser_download_url' | head -n 1)"
+                I18N_URL="$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.ipk$")) | .browser_download_url' | head -n 1)"
+            fi
+
+            echo "尝试下载 APP: $APP_URL"
+            if [ -n "$APP_URL" ] && [ "$APP_URL" != "null" ] && curl -fL "$APP_URL" -o "passwall-ipk/$(basename "$APP_URL")"; then
+                echo "成功下载 APP"
+            else
+                echo "错误: 无法下载 luci-app-passwall 包"
+                exit 1
+            fi
+
+            echo "尝试下载 I18N: $I18N_URL"
+            if [ -n "$I18N_URL" ] && [ "$I18N_URL" != "null" ] && curl -fL "$I18N_URL" -o "passwall-ipk/$(basename "$I18N_URL")"; then
+                echo "成功下载 I18N"
+            else
+                echo "警告: 无法下载中文语言包，将继续构建但不包含语言包"
+            fi
             ;;
         *)
-            APP_PAT='^25\.12\+.*luci-app-passwall.*\.apk$'
-            I18N_PAT='^25\.12\+.*luci-i18n-passwall-zh-cn.*\.apk$'
+            # 架构目录名与 ARCH_MAP 一致（x86_64 / aarch64_cortex-a53 / aarch64_generic）
+            case "$TARGET_ARCH" in
+                x86_64) SF_ARCH="x86_64" ;;
+                aarch64_cortex-a53) SF_ARCH="aarch64_cortex-a53" ;;
+                aarch64_generic) SF_ARCH="aarch64_generic" ;;
+                *) SF_ARCH="x86_64" ;;
+            esac
+            SF_BASE="https://sourceforge.net/projects/openwrt-passwall-build/files/releases/packages-25.12/$SF_ARCH"
+
+            # 25.x 使用 apk：直接从上游 SourceForge 下载原生 apk（主包+语言包+依赖）
+            # 文件名随上游更新，这里从 RSS 动态探测最新可用版本；探测失败则按最近已知版本回退。
+
+            # 从 RSS 获取 passwall_luci 目录下最新的 luci-app-passwall apk 文件名
+            RSS_LUCI="$(curl -fsSL "https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-25.12/$SF_ARCH/passwall_luci" 2>/dev/null || true)"
+            LUCI_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-app-passwall-[0-9.]+-r[0-9]+\.apk' | sort -u | head -n1)"
+            [ -z "$LUCI_FILE" ] && LUCI_FILE="luci-app-passwall-26.9.16-r1.apk"
+            I18N_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-i18n-passwall-zh-cn-[0-9.]+\.apk' | sort -u | head -n1)"
+            [ -z "$I18N_FILE" ] && I18N_FILE="luci-i18n-passwall-zh-cn-26.9.16.apk"
+            echo "上游 luci 包: $LUCI_FILE / $I18N_FILE"
+
+            echo "下载 PassWall 主程序与语言包 (apk)..."
+            curl -fL "$SF_BASE/passwall_luci/$LUCI_FILE" -o "passwall-ipk/$LUCI_FILE" || { echo "错误: 无法下载 $LUCI_FILE"; exit 1; }
+            if ! curl -fL "$SF_BASE/passwall_luci/$I18N_FILE" -o "passwall-ipk/$I18N_FILE"; then
+                echo "警告: 无法下载中文语言包"
+            fi
+
+            # 下载核心依赖 apk（来源 openwrt-passwall-build / packages-25.12 / passwall_packages）
+            # 通过 RSS 探测实际文件名，探测失败则回退到最近已知版本
+            RSS_PKG="$(curl -fsSL "https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-25.12/$SF_ARCH/passwall_packages" 2>/dev/null || true)"
+            sf_probe() {
+                pat="$1"
+                echo "$RSS_PKG" | grep -oE "$pat" | sort -u | head -n1
+            }
+            # macOS Bash 3.2 不支持关联数组，用平行列表
+            DEP_NAMES="chinadns-ng dns2socks tcping geoview xray-core sing-box hysteria v2ray-geoip v2ray-geosite"
+            FALLBACK=(
+                "chinadns-ng-2025.08.09-r1.apk"
+                "dns2socks-2.1-r2.apk"
+                "tcping-0.3-r1.apk"
+                "geoview-0.2.6-r1.apk"
+                "xray-core-26.9.9-r1.apk"
+                "sing-box-1.14.1-r1.apk"
+                "hysteria-2.12.3-r1.apk"
+                "v2ray-geoip-202609040655.1.apk"
+                "v2ray-geosite-202609072354.1.apk"
+            )
+            i=0
+            for dep in $DEP_NAMES; do
+                file="$(sf_probe "${dep}-[0-9.]+-r[0-9]+\.apk")"
+                # geoip/geosite 无 -r 版本
+                [ -z "$file" ] && [ "$dep" = "v2ray-geoip" ] && file="$(sf_probe 'v2ray-geoip-[0-9]+\.apk')"
+                [ -z "$file" ] && [ "$dep" = "v2ray-geosite" ] && file="$(sf_probe 'v2ray-geosite-[0-9]+\.apk')"
+                [ -z "$file" ] && file="${FALLBACK[$i]}"
+                if curl -fL "$SF_BASE/passwall_packages/$file" -o "passwall-ipk/$file"; then
+                    echo "✓ 依赖: $file"
+                else
+                    echo "警告: 无法下载依赖 $dep (尝试 $file)"
+                fi
+                i=$((i+1))
+            done
             ;;
     esac
-
-    APP_URL="$(echo "$RELEASE_DATA" | jq -r --arg pat "$APP_PAT" '.assets[] | select(.name | test($pat)) | .browser_download_url' | head -n 1)"
-    I18N_URL="$(echo "$RELEASE_DATA" | jq -r --arg pat "$I18N_PAT" '.assets[] | select(.name | test($pat)) | .browser_download_url' | head -n 1)"
-
-    if [ -z "$APP_URL" ] || [ "$APP_URL" = "null" ]; then
-        echo "警告: SDK_VERSION=$SDK_VERSION 未匹配到对应格式，回退到通用匹配..."
-        APP_URL="$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-app-passwall.*\\.(ipk|apk)$")) | .browser_download_url' | head -n 1)"
-        I18N_URL="$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("luci-i18n-passwall-zh-cn.*\\.(ipk|apk)$")) | .browser_download_url' | head -n 1)"
-    fi
-
-    echo "尝试下载 APP: $APP_URL"
-    if [ -n "$APP_URL" ] && [ "$APP_URL" != "null" ] && curl -fL "$APP_URL" -o "passwall-ipk/$(basename "$APP_URL")"; then
-        echo "成功下载 APP"
-    else
-        echo "错误: 无法下载 luci-app-passwall 包"
-        exit 1
-    fi
-
-    echo "尝试下载 I18N: $I18N_URL"
-    if [ -n "$I18N_URL" ] && [ "$I18N_URL" != "null" ] && curl -fL "$I18N_URL" -o "passwall-ipk/$(basename "$I18N_URL")"; then
-        echo "成功下载 I18N"
-    else
-        echo "警告: 无法下载中文语言包，将继续构建但不包含语言包"
-    fi
 
     echo "已下载文件："
     ls -lh passwall-ipk/
@@ -168,134 +232,23 @@ if [ -n "$I18N_PKG" ]; then
   cp -f "$I18N_PKG" "$STAGING_DIR/luci-i18n-passwall-zh-cn.$I18N_EXT"
 fi
 
-# 复制本地的 depends 目录（包含完整依赖）
-echo "复制依赖包..."
+# 复制本地的 depends 目录（包含完整依赖，opkg 场景）
+echo "复制本地依赖包..."
 if [ -d depends ]; then
   cp -r depends/* "$DEP_DIR/"
 fi
 
-# 25.x / OpenWrt 25.12+ 使用 apk 包管理器，而 depends 下为 ipk（opkg 格式）。
-# apk 无法直接安装 ipk，需在构建时转换为 apk v2 格式。
-# APK v2 结构 = 单个 gzip tar，含 .PKGINFO 元数据 + 数据文件直接平铺（无 data.tar.gz 嵌套）。
-# 兼容两种 ipk 容器：旧式 ar 归档（!<arch>）与新式 gzip tar 容器（内部含 data.tar.gz/control.tar.gz）。
-convert_depends_to_apk() {
-  echo "SDK_VERSION=$SDK_VERSION 为 25.x，转换 depends/*.ipk -> .apk..."
-  local work
-  work="$(mktemp -d)"
-  for ipk in "$DEP_DIR"/*.ipk; do
-    [ -f "$ipk" ] || continue
-    python3 - "$ipk" <<'PYEOF'
-import sys, tarfile, io, gzip
-
-def read_ar_member(path, wanted):
-    """读取 ar 归档中的指定成员（data.tar.gz / control.tar.gz），返回 bytes"""
-    with open(path, 'rb') as f:
-        data = f.read()
-    if not data.startswith(b'!<arch>\n'):
-        return None
-    off, members = 8, {}
-    while off + 60 <= len(data):
-        name = data[off:off+16].decode().strip()
-        size = int(data[off+48:off+58].decode().strip())
-        body = data[off+60:off+60+size]
-        members[name.rstrip('/')] = body
-        off += 60 + size + (size & 1)
-    return members.get(wanted)
-
-def read_tar_member(path, wanted):
-    """读取 gzip tar 容器中的指定成员（./data.tar.gz / ./control.tar.gz），返回 bytes"""
-    try:
-        t = tarfile.open(path, mode='r:gz')
-    except Exception:
-        return None
-    for m in t.getmembers():
-        if m.name.rstrip('/').endswith(wanted):
-            return t.extractfile(m).read()
-    return None
-
-def extract_member(path, wanted):
-    b = read_ar_member(path, wanted)
-    if b is not None:
-        return b
-    return read_tar_member(path, wanted)
-
-def control_to_pkginfo(control_text):
-    fields = {}
-    for line in control_text.splitlines():
-        if ':' in line:
-            k, v = line.split(':', 1)
-            fields[k.strip()] = v.strip()
-    lines = []
-    def add(k, v):
-        if v:
-            lines.append('%s = %s' % (k, v))
-    add('pkgname', fields.get('Package'))
-    add('pkgver', fields.get('Version'))
-    add('arch', fields.get('Architecture'))
-    add('origin', fields.get('Package'))
-    add('pkgdesc', fields.get('Description'))
-    add('url', fields.get('URL'))
-    add('maintainer', fields.get('Maintainer'))
-    add('license', fields.get('License'))
-    # ipk 的 Depends 是逗号分隔，转成 apk 的 depend = 每行一个
-    for d in fields.get('Depends', '').split(','):
-        d = d.strip()
-        if d:
-            lines.append('depend = %s' % d.split()[0])
-    return '\n'.join(lines) + '\n'
-
-src = sys.argv[1]
-data = extract_member(src, 'data.tar.gz')
-if data is None:
-    print('跳过（无 data.tar.gz）: %s' % src)
-    sys.exit(0)
-control_tar = extract_member(src, 'control.tar.gz')
-control_text = ''
-if control_tar:
-    try:
-        ct = tarfile.open(fileobj=io.BytesIO(control_tar), mode='r:gz')
-        for m in ct.getmembers():
-            if m.name.rstrip('/').endswith('/control') or m.name.rstrip('/') == 'control':
-                control_text = ct.extractfile(m).read().decode('utf-8', 'replace')
-                break
-    except Exception:
-        pass
-pkginfo = control_to_pkginfo(control_text)
-
-# 构建 apk v2：单个 gzip tar，.PKGINFO + 数据文件平铺
-buf = io.BytesIO()
-t = tarfile.open(fileobj=buf, mode='w', format=tarfile.USTAR_FORMAT)
-info = tarfile.TarInfo('.PKGINFO')
-info.size = len(pkginfo.encode('utf-8'))
-info.mode = 0o644
-t.addfile(info, io.BytesIO(pkginfo.encode('utf-8')))
-# 解出 ipk 的 data.tar.gz，把其中文件平铺进 apk（保留权限/属主）
-dt = tarfile.open(fileobj=io.BytesIO(data), mode='r:gz')
-for m in dt.getmembers():
-    if m.isfile() or m.islnk() or m.issym():
-        try:
-            t.addfile(m, dt.extractfile(m))
-        except Exception:
-            t.addfile(m)
-    else:
-        t.addfile(m)
-t.close()
-
-name = src.rsplit('/', 1)[-1]
-dst = src.rsplit('.', 1)[0] + '.apk'
-with open(dst, 'wb') as f:
-    f.write(gzip.compress(buf.getvalue()))
-print('已转换: %s -> %s' % (name, dst.rsplit('/', 1)[-1]))
-PYEOF
-  done
-  rm -rf "$work"
-}
-
-# 22.03 / 23.05 / 24.10 仍用 opkg+ipk，仅 25.x 需要 ipk->apk
+# 25.x / OpenWrt 25.12+ 使用 apk：把下载到的原生 apk 依赖（SourceForge）全部放入 depends/
+# 供 install.sh 直接 apk add --allow-untrusted depends/*.apk（无需 ipk->apk 转换）
 case "$SDK_VERSION" in
   22.03*|19.07*|18.06*|23.05*|24.10*) ;;
   *)
-    convert_depends_to_apk
+    if ls passwall-ipk/*.apk >/dev/null 2>&1; then
+      echo "复制 25.x apk 依赖到 depends/..."
+      for f in passwall-ipk/*.apk; do
+        cp -f "$f" "$DEP_DIR/"
+      done
+    fi
     ;;
 esac
 
