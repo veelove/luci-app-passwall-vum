@@ -239,110 +239,6 @@ jobs:
           echo "appver=$APPVER" >> "$GITHUB_OUTPUT"
           echo "APP_VERSION=$APPVER" >> "$GITHUB_ENV"
 
-      - name: 下载最新核心（Xray/Sing-Box/Hysteria）并打包为 ipk/apk
-        id: cores
-        run: |
-          set -e
-          curl_gh() { curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
-
-          ARCH_MAP="${ARCH_MAP:?}"
-          # 目标架构 -> 上游二进制架构
-          case "$ARCH_MAP" in
-            x86_64) GOARCH=amd64 ;;
-            aarch64_cortex-a53|aarch64_generic) GOARCH=arm64 ;;
-            *) echo "错误: 不支持的架构 $ARCH_MAP"; exit 1 ;;
-          esac
-          # 25.x / OpenWrt 25.12+ 使用 apk 包格式；其他版本仍打包 ipk
-          case "${{ inputs.sdk_version }}" in
-            22.03*|19.07*|18.06*|23.05*|24.10*) PKG_FMT=ipk ;;
-            *) PKG_FMT=apk ;;
-          esac
-          echo "核心二进制架构: $GOARCH（$PKG_FMT Architecture: $ARCH_MAP）"
-
-          mkdir -p cores
-          WORK="$(mktemp -d)"
-          trap 'rm -rf "$WORK"' EXIT
-
-          # 通用核心打包：mk_pkg <包名> <版本> <二进制路径>
-          mk_pkg() {
-            name="$1"; ver="$2"; bin="$3"
-            d="$WORK/$name"
-            mkdir -p "$d/data/usr/bin"
-            install -m 0755 "$bin" "$d/data/usr/bin/$name"
-            case "$PKG_FMT" in
-              apk)
-                # 25.x apk 格式（Alpine v3 / ADB）：.PKGINFO + 数据文件平铺，整体 gzip
-                cat > "$d/.PKGINFO" <<EOF
-          pkgname = $name
-          pkgver = ${ver}-r1
-          arch = $ARCH_MAP
-          origin = $name
-          pkgdesc = $name latest upstream binary
-          EOF
-                cd "$d" && tar -czf "$WORK/$name-stage.tar.gz" .PKGINFO data/ && cd - >/dev/null
-                cat "$WORK/$name-stage.tar.gz" > "cores/${name}-${ver}-r1.apk"
-                rm -f "$WORK/$name-stage.tar.gz"
-                echo "已打包: cores/${name}-${ver}-r1.apk"
-                ;;
-              *)
-                # ipk 格式（opkg）：control.tar.gz + data.tar.gz + debian-binary
-                mkdir -p "$d/control"
-                cat > "$d/control/control" <<EOF
-          Package: $name
-          Version: $ver
-          Architecture: $ARCH_MAP
-          Maintainer: passwall-builder
-          Description: $name latest upstream binary
-          EOF
-                tar -C "$d/control" -czf "$d/control.tar.gz" .
-                tar -C "$d/data" -czf "$d/data.tar.gz" .
-                printf '2.0\n' > "$d/debian-binary"
-                tar -C "$d" -czf "cores/${name}_${ver}_${ARCH_MAP}.ipk" debian-binary control.tar.gz data.tar.gz
-                echo "已打包: cores/${name}_${ver}_${ARCH_MAP}.ipk"
-                ;;
-            esac
-          }
-
-          # ---------- Xray（上游所有 release 均标记为 prerelease，取列表第一个最新 tag） ----------
-          XRAY_VER="$(curl_gh "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=1" | jq -r '.[0].tag_name' | sed 's/^v//')"
-          if [ "$GOARCH" = amd64 ]; then XRAY_ASSET="Xray-linux-64.zip"; else XRAY_ASSET="Xray-linux-arm64-v8a.zip"; fi
-          echo "下载 Xray v$XRAY_VER ($XRAY_ASSET) ..."
-          curl -fL "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VER}/${XRAY_ASSET}" -o "$WORK/xray.zip"
-          mkdir -p "$WORK/xray-extract"
-          unzip -oq "$WORK/xray.zip" xray -d "$WORK/xray-extract"
-          mk_pkg xray "$XRAY_VER" "$WORK/xray-extract/xray"
-
-          # ---------- Sing-Box（取最新稳定版，跳过 alpha/beta/rc；OpenWrt 为 musl libc，必须用 musl 变体） ----------
-          SB_VER="$(curl_gh "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r .tag_name | sed 's/^v//')"
-          SB_ASSET="sing-box-${SB_VER}-linux-${GOARCH}-musl.tar.gz"
-          echo "下载 Sing-Box v$SB_VER ($SB_ASSET) ..."
-          curl -fL "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/${SB_ASSET}" -o "$WORK/sing-box.tar.gz"
-          mkdir -p "$WORK/sb-extract"
-          tar -xzf "$WORK/sing-box.tar.gz" -C "$WORK/sb-extract"
-          SB_BIN="$(find "$WORK/sb-extract" -type f -name sing-box | head -n1)"
-          [ -n "$SB_BIN" ] || { echo "错误: sing-box 二进制解压失败"; exit 1; }
-          mk_pkg sing-box "$SB_VER" "$SB_BIN"
-
-          # ---------- Hysteria（取最新稳定版，tag 形如 app/v2.12.2） ----------
-          HY_TAG="$(curl_gh "https://api.github.com/repos/apernet/hysteria/releases/latest" | jq -r .tag_name)"
-          HY_VER="$(echo "$HY_TAG" | sed 's#.*/v##')"
-          HY_TAG_ENC="$(printf '%s' "$HY_TAG" | sed 's#/#%2F#g')"
-          HY_ASSET="hysteria-linux-${GOARCH}"
-          echo "下载 Hysteria v$HY_VER ($HY_ASSET) ..."
-          mkdir -p "$WORK/hy-extract"
-          curl -fL "https://github.com/apernet/hysteria/releases/download/${HY_TAG_ENC}/${HY_ASSET}" -o "$WORK/hy-extract/hysteria"
-          mk_pkg hysteria "$HY_VER" "$WORK/hy-extract/hysteria"
-
-          echo "XRAY_VERSION=$XRAY_VER" >> "$GITHUB_ENV"
-          echo "SINGBOX_VERSION=$SB_VER" >> "$GITHUB_ENV"
-          echo "HYSTERIA_VERSION=$HY_VER" >> "$GITHUB_ENV"
-          echo "xray=$XRAY_VER" >> "$GITHUB_OUTPUT"
-          echo "singbox=$SB_VER" >> "$GITHUB_OUTPUT"
-          echo "hysteria=$HY_VER" >> "$GITHUB_OUTPUT"
-
-          echo "最新核心打包结果："
-          ls -lh cores/
-
       - name: 构建 Makeself 安装包（完全对齐样例结构/逻辑）
         run: |
           set -e
@@ -379,33 +275,20 @@ jobs:
             cp -r depends/* "$DEP_DIR/"
           fi
 
-          # 用构建时下载的最新核心替换 depends 中的旧版 xray/sing-box/hysteria
-          if ls cores/*.ipk >/dev/null 2>&1; then
-            echo "注入最新核心 ipk（Xray/Sing-Box/Hysteria）..."
-            rm -f "$DEP_DIR"/xray_*.ipk "$DEP_DIR"/sing-box_*.ipk "$DEP_DIR"/hysteria_*.ipk
-            cp -f cores/*.ipk "$DEP_DIR/"
-          fi
-
           # 25.x / OpenWrt 25.12+ 使用 apk：把 download 步骤下载的原生 apk 依赖全部放入 depends/
-          # 供 install.sh 直接 apk add --allow-untrusted depends/*.apk（无需 ipk->apk 转换）
-          case "$SDK_VERSION" in
-            22.03*|19.07*|18.06*|23.05*|24.10*) ;;
-            *)
-              # apk 核心（xray/sing-box/hysteria）替换 depends 中的旧版
-              if ls cores/*.apk >/dev/null 2>&1; then
-                echo "注入最新核心 apk（Xray/Sing-Box/Hysteria）..."
-                rm -f "$DEP_DIR"/xray_*.apk "$DEP_DIR"/sing-box_*.apk "$DEP_DIR"/hysteria_*.apk
-                cp -f cores/*.apk "$DEP_DIR/"
-              fi
-              # 把 fetch 步骤下载的 apk 依赖全部复制进 depends/
-              if ls passwall-ipk/*.apk >/dev/null 2>&1; then
-                echo "复制 25.x apk 依赖到 depends/..."
-                for f in passwall-ipk/*.apk; do
-                  cp -f "$f" "$DEP_DIR/"
-                done
-              fi
-              ;;
-          esac
+          # 供 install.sh 直接 apk add --allow-untrusted depends/*.apk
+          # xray-core / sing-box / hysteria 已在 fetch 步骤从 SourceForge 下载到 passwall-ipk/，
+          # 在这里一并复制进 depends/，无需在 build 时再单独打包核心。
+          if [ "$SDK_VERSION" != "22.03"* ] && [ "$SDK_VERSION" != "19.07"* ] && [ "$SDK_VERSION" != "18.06"* ] \
+             && [ "$SDK_VERSION" != "23.05"* ] && [ "$SDK_VERSION" != "24.10"* ]; then
+            # 25.x: 把 fetch 步骤下载的 apk 依赖全部复制进 depends/
+            if ls passwall-ipk/*.apk >/dev/null 2>&1; then
+              echo "复制 25.x apk 依赖到 depends/..."
+              for f in passwall-ipk/*.apk; do
+                cp -f "$f" "$DEP_DIR/"
+              done
+            fi
+          fi
 
           echo "打包目录预览："
           find "$STAGING_DIR" -maxdepth 2 -type f -print | sed -n '1,200p'
@@ -656,9 +539,6 @@ jobs:
 
           echo "PassWall(luci-app)版本: $APP_VERSION" > version.txt
           echo "上游Release Tag: $LATEST_VERSION" >> version.txt
-          echo "Xray版本: ${XRAY_VERSION:-未知}" >> version.txt
-          echo "Sing-Box版本: ${SINGBOX_VERSION:-未知}" >> version.txt
-          echo "Hysteria版本: ${HYSTERIA_VERSION:-未知}" >> version.txt
           echo "SDK版本: $SDK_VERSION" >> version.txt
           echo "OpenSSL标记: $OPENSSL_TAG" >> version.txt
           echo "构建时间: ${{ steps.date.outputs.date }}" >> version.txt
@@ -688,12 +568,9 @@ jobs:
             artifact/installer/version.txt
           body: |
             ## PassWall ${{ steps.parsever.outputs.appver }} for iStoreOS - ${{ inputs.target_arch }}
-            
+
             PassWall(luci-app)版本: ${{ steps.parsever.outputs.appver }}
             上游Release Tag: ${{ steps.fetch.outputs.version }}
-            Xray版本: ${{ steps.cores.outputs.xray }}
-            Sing-Box版本: ${{ steps.cores.outputs.singbox }}
-            Hysteria版本: ${{ steps.cores.outputs.hysteria }}
             SDK版本: ${{ inputs.sdk_version }}
             OpenSSL标记: ${{ inputs.openssl_tag }}
             构建时间: ${{ steps.date.outputs.date }}
