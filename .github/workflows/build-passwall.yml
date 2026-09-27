@@ -108,22 +108,41 @@ jobs:
               curl -fL "$I18N_URL" -o passwall-ipk/$(basename "$I18N_URL")
               ;;
             *)
-              # ---- apk 场景（25.x / OpenWrt 25.12+）：从上游 SourceForge 下载原生 apk ----
+              # ---- apk 场景（25.x / OpenWrt 25.12+）：luci 主包/i18n 从 GitHub release 取，依赖从 SourceForge 取 ----
               SF_ARCH="$ARCH_MAP"
               SF_BASE="https://sourceforge.net/projects/openwrt-passwall-build/files/releases/packages-25.12/$SF_ARCH"
 
-              RSS_LUCI="$(curl -fsSL "https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-25.12/$SF_ARCH/passwall_luci" 2>/dev/null || true)"
-              LUCI_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-app-passwall-[0-9.]+(-r[0-9]+)?\.apk' | sort -V | tail -n1)"
-              [ -z "$LUCI_FILE" ] && LUCI_FILE="luci-app-passwall-26.9.16-r1.apk"
-              I18N_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-i18n-passwall-zh-cn-[0-9.]+(-r[0-9]+)?\.apk' | sort -V | tail -n1)"
-              [ -z "$I18N_FILE" ] && I18N_FILE="luci-i18n-passwall-zh-cn-26.9.16.apk"
+              # luci 主包与 i18n：直接从 GitHub release assets 拉（命名固定 25.12+_luci-app-passwall-<ver>[-rN].apk），
+              # 不依赖 SourceForge RSS，避免 SF 同步滞后导致版本停在旧版。
+              # 取到的资产 URL 形如：
+              #   .../25.12+_luci-app-passwall-26.9.26-r1.apk
+              #   .../25.12+_luci-i18n-passwall-zh-cn-26.9.26.apk
+              APP_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("^25\\.12\\+_luci-app-passwall-.*\\.apk$")) | .browser_download_url' | head -n 1)
+              I18N_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("^25\\.12\\+_luci-i18n-passwall-zh-cn-.*\\.apk$")) | .browser_download_url' | head -n 1)
+
+              if [ -z "$APP_URL" ] || [ "$APP_URL" = "null" ]; then
+                echo "警告: GitHub release 未找到 25.12+ apk 主包，回退到 SourceForge RSS..."
+                RSS_LUCI="$(curl -fsSL "https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-25.12/$SF_ARCH/passwall_luci" 2>/dev/null || true)"
+                LUCI_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-app-passwall-[0-9.]+(-r[0-9]+)?\.apk' | sort -V | tail -n1)"
+                [ -z "$LUCI_FILE" ] && LUCI_FILE="luci-app-passwall-26.9.16-r1.apk"
+                APP_URL="$SF_BASE/passwall_luci/$LUCI_FILE"
+              fi
+              if [ -z "$I18N_URL" ] || [ "$I18N_URL" = "null" ]; then
+                RSS_LUCI="$(curl -fsSL "https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-25.12/$SF_ARCH/passwall_luci" 2>/dev/null || true)"
+                I18N_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-i18n-passwall-zh-cn-[0-9.]+(-r[0-9]+)?\.apk' | sort -V | tail -n1)"
+                [ -z "$I18N_FILE" ] && I18N_FILE="luci-i18n-passwall-zh-cn-26.9.16.apk"
+                I18N_URL="$SF_BASE/passwall_luci/$I18N_FILE"
+              fi
+
+              LUCI_FILE="$(basename "$APP_URL")"
+              I18N_FILE="$(basename "$I18N_URL")"
               echo "上游 luci 包: $LUCI_FILE / $I18N_FILE"
 
               echo "下载 PassWall 主程序与语言包 (apk)..."
-              curl -fL "$SF_BASE/passwall_luci/$LUCI_FILE" -o "passwall-ipk/$LUCI_FILE"
-              curl -fL "$SF_BASE/passwall_luci/$I18N_FILE" -o "passwall-ipk/$I18N_FILE" || echo "警告: 无法下载中文语言包"
+              curl -fL "$APP_URL" -o "passwall-ipk/$LUCI_FILE"
+              curl -fL "$I18N_URL" -o "passwall-ipk/$I18N_FILE" || echo "警告: 无法下载中文语言包"
 
-              # 下载核心依赖 apk
+              # 下载核心依赖 apk（仍走 SourceForge）
               RSS_PKG="$(curl -fsSL "https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-25.12/$SF_ARCH/passwall_packages" 2>/dev/null || true)"
               sf_probe() {
                 echo "$RSS_PKG" | grep -oE "$1" | sort -V | tail -n1
