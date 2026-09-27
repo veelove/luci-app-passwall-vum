@@ -113,9 +113,9 @@ jobs:
               SF_BASE="https://sourceforge.net/projects/openwrt-passwall-build/files/releases/packages-25.12/$SF_ARCH"
 
               RSS_LUCI="$(curl -fsSL "https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-25.12/$SF_ARCH/passwall_luci" 2>/dev/null || true)"
-              LUCI_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-app-passwall-[0-9.]+-r[0-9]+\.apk' | sort -u | head -n1)"
+              LUCI_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-app-passwall-[0-9.]+(-r[0-9]+)?\.apk' | sort -V | tail -n1)"
               [ -z "$LUCI_FILE" ] && LUCI_FILE="luci-app-passwall-26.9.16-r1.apk"
-              I18N_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-i18n-passwall-zh-cn-[0-9.]+\.apk' | sort -u | head -n1)"
+              I18N_FILE="$(echo "$RSS_LUCI" | grep -oE 'luci-i18n-passwall-zh-cn-[0-9.]+(-r[0-9]+)?\.apk' | sort -V | tail -n1)"
               [ -z "$I18N_FILE" ] && I18N_FILE="luci-i18n-passwall-zh-cn-26.9.16.apk"
               echo "上游 luci 包: $LUCI_FILE / $I18N_FILE"
 
@@ -126,7 +126,7 @@ jobs:
               # 下载核心依赖 apk
               RSS_PKG="$(curl -fsSL "https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-25.12/$SF_ARCH/passwall_packages" 2>/dev/null || true)"
               sf_probe() {
-                echo "$RSS_PKG" | grep -oE "$1" | sort -u | head -n1
+                echo "$RSS_PKG" | grep -oE "$1" | sort -V | tail -n1
               }
               DEP_NAMES="chinadns-ng dns2socks tcping geoview xray-core sing-box hysteria v2ray-geoip v2ray-geosite"
               FALLBACK=(
