@@ -169,7 +169,8 @@ chmod +x PassWall_26.5.11_x86_64_all_sdk_24.10.6.run
 
 ## 依赖包说明
 
-安装包中包含完整的 23 个 PassWall 依赖包：
+安装包中包含 PassWall 必需依赖，apk / ipk 都会随构建脚本从 SourceForge 上游 `packages-<sdk>/<arch>/passwall_packages/` 自动拉取，覆盖：
+
 - chinadns-ng
 - dns2socks
 - **geoview** ([snowie2000/geoview](https://github.com/snowie2000/geoview))
@@ -179,14 +180,16 @@ chmod +x PassWall_26.5.11_x86_64_all_sdk_24.10.6.run
 - naiveproxy
 - shadow-tls
 - shadowsocks-rust (sslocal/ssserver)
-- shadowsocksr-libev (ssr-local/ssr-redir/ssr-server)
-- simple-obfs-client
+- shadowsocksr-libev（ssr-check / ssr-local / ssr-nat / ssr-redir / ssr-server；从 SourceForge 25.12 / 24.10 / 23.05 拉取；25.x 三架构齐全，24.10 / 23.05 仅 x86_64；22.03 上游未发布此核心）
+- simple-obfs-client / simple-obfs-server
 - **sing-box** ([SagerNet/sing-box](https://github.com/SagerNet/sing-box))
 - tcping
 - trojan-plus
 - tuic-client
 - v2ray-geoip, v2ray-geosite, v2ray-plugin
 - **xray-core** ([XTLS/Xray-core](https://github.com/XTLS/Xray-core)), xray-plugin
+
+`depends/` 目录保留的是按 `apk add / opkg install` 离线安装用的 fallback 资产；线上构建优先从上游 RSS 探测最新版本，失败时回退到 `depends/` 副本。
 
 ## 组件上游源
 

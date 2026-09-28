@@ -97,6 +97,52 @@ if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
             else
                 echo "警告: 无法下载中文语言包，将继续构建但不包含语言包"
             fi
+
+            # shadowsocksr-libev 的 ipk：直接走 SourceForge passwall_packages
+            # 22.03 没有 ssr-* ipk；23.05 / 24.10 仅 x86_64。
+            # SourceForge 的目录按 SDK 版本号分段，固定路径 packages-22.03 / -23.05 / -24.10。
+            case "$SDK_VERSION" in
+                22.03*|19.07*|18.06*)
+                    SF_PKG_BASE="https://sourceforge.net/projects/openwrt-passwall-build/files/releases/packages-22.03"
+                    SF_PKG_RSS_URL="https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-22.03/x86_64/passwall_packages"
+                    # 22.03 没有 ssr-* ipk，禁用下载
+                    SF_PKG_ENABLE="0"
+                    ;;
+                23.05*)
+                    SF_PKG_BASE="https://sourceforge.net/projects/openwrt-passwall-build/files/releases/packages-23.05"
+                    SF_PKG_RSS_URL="https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-23.05/x86_64/passwall_packages"
+                    # 23.05 上游 SF 仅发 x86_64；arm 用户将不下载 SSR 核心
+                    SF_PKG_ARCH="x86_64"
+                    SF_PKG_ENABLE="1"
+                    ;;
+                24.10*)
+                    SF_PKG_BASE="https://sourceforge.net/projects/openwrt-passwall-build/files/releases/packages-24.10"
+                    SF_PKG_RSS_URL="https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-24.10/x86_64/passwall_packages"
+                    # 24.10 上游 SF 仅发 x86_64；arm 用户将不下载 SSR 核心
+                    SF_PKG_ARCH="x86_64"
+                    SF_PKG_ENABLE="1"
+                    ;;
+            esac
+            if [ "${SF_PKG_ENABLE:-0}" = "1" ]; then
+                SF_PKG_RSS="$(curl -fsSL "$SF_PKG_RSS_URL" 2>/dev/null || true)"
+                SSR_IPK_ROLES="check local nat redir server"
+                # 兼容 macOS BSD grep：从 RSS 中按文件名段匹配，匹配到 .ipk$ 结束。
+                ssr_ipk_redir="$(printf "%s" "$SF_PKG_RSS" | grep -oE 'shadowsocksr-libev-ssr-redir_[^"<>]*\.ipk' | grep -E '_x86_64\.ipk$' | sort -V | tail -n1)"
+                [ -z "$ssr_ipk_redir" ] && ssr_ipk_redir="shadowsocksr-libev-ssr-redir_2.5.6-r13_x86_64.ipk"
+                ssr_ipk_ver="$(printf "%s" "$ssr_ipk_redir" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+                [ -z "$ssr_ipk_ver" ] && ssr_ipk_ver="2.5.6"
+                ssr_ipk_rev="$(printf "%s" "$ssr_ipk_redir" | grep -oE '[-_]r?[0-9]+_x86_64\.ipk$' | head -n1)"
+                [ -z "$ssr_ipk_rev" ] && ssr_ipk_rev="-r13_x86_64.ipk"
+                for role in $SSR_IPK_ROLES; do
+                    file="$(printf "%s" "$SF_PKG_RSS" | grep -oE "shadowsocksr-libev-ssr-${role}_[^\"<>]*\\.ipk" | grep -E '_x86_64\.ipk$' | sort -V | tail -n1)"
+                    [ -z "$file" ] && file="shadowsocksr-libev-ssr-${role}_${ssr_ipk_ver}${ssr_ipk_rev}"
+                    if curl -fL "$SF_PKG_BASE/$SF_PKG_ARCH/passwall_packages/$file" -o "passwall-ipk/$file"; then
+                        echo "✓ SSR 核心: $file"
+                    else
+                        echo "警告: 无法下载 SSR 核心 $role (尝试 $file)"
+                    fi
+                done
+            fi
             ;;
         *)
             # 架构目录名与 ARCH_MAP 一致（x86_64 / aarch64_cortex-a53 / aarch64_generic）
@@ -158,6 +204,24 @@ if [ -z "$(ls -A passwall-ipk/ 2>/dev/null)" ]; then
                     echo "警告: 无法下载依赖 $dep (尝试 $file)"
                 fi
                 i=$((i+1))
+            done
+
+            # shadowsocksr-libev：包名形如 shadowsocksr-libev-ssr-<role>-<ver>.apk，
+            # 通过 RSS 探测最新版本；探测失败时回退到 2.5.6-r13。
+            SSR_ROLES="check local nat redir server"
+            ssr_file="$(sf_probe 'shadowsocksr-libev-ssr-redir-[0-9.]+-r[0-9]+\.apk')"
+            [ -z "$ssr_file" ] && ssr_file="shadowsocksr-libev-ssr-redir-2.5.6-r13.apk"
+            ssr_ver="$(echo "$ssr_file" | sed -E 's/^shadowsocksr-libev-ssr-redir-([0-9.]+)-r[0-9]+\.apk$/\1/')"
+            [ -z "$ssr_ver" ] && ssr_ver="2.5.6"
+            for role in $SSR_ROLES; do
+                # 优先取 RSS 中同角色同版本的最新文件
+                file="$(sf_probe "shadowsocksr-libev-ssr-${role}-${ssr_ver}-r[0-9]+\\.apk")"
+                [ -z "$file" ] && file="shadowsocksr-libev-ssr-${role}-${ssr_ver}-r13.apk"
+                if curl -fL "$SF_BASE/passwall_packages/$file" -o "passwall-ipk/$file"; then
+                    echo "✓ SSR 核心: $file"
+                else
+                    echo "警告: 无法下载 SSR 核心 $role (尝试 $file)"
+                fi
             done
             ;;
     esac
